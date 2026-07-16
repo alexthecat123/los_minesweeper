@@ -59,10 +59,10 @@ unit MSDialog;
 { Range checking OFF for this unit, deliberately.  The Field Editor's value   }
 { array is declared 'data = array [0..0] of byte' (unit dbenv) -- the         }
 { open-array idiom -- and reading character i means indexing element i of an  }
-{ array whose DECLARED bound is 0.  With {$R+} that is a runtime range fault; }
+{ array whose DECLARED bound is 0.  With R+ that is a runtime range fault;    }
 { every shipped app that touches such structures compiles its production      }
 { build with range checks off (cf. the Calculator's RangeChk conditional,     }
-{ APHP-HP.TEXT:37).  The other Minesweeper units keep the default {$R+},      }
+{ APHP-HP.TEXT:37).  The other Minesweeper units keep the default R+,         }
 { where the checks catch real mistakes.                                       }
 
 INTERFACE
@@ -80,7 +80,7 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
                                              { name 'fieldedit', object file 'fld.obj' }
                                              { -- unit and file names differ           }
                                              { (02-workshop-build 5.2)                 }
-     (*$U libos/SysCall.obj *)  SysCall,     { (via MSGlobals)           - 05-os-syscalls }
+     (*$U SysCall.obj *)        SysCall,     { (via MSGlobals)           - 05-os-syscalls }
      (*$U wm.events.obj *)      Events,      { GetEvent, Time, clickDelay - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,     { TakeControl, BeginUpdate  - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,       { MenuSelect, EnableMenu    - 06-lib-wm-b }
@@ -88,8 +88,8 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
      (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
      (*$U WMlCrs.obj *)         WMLCrs,      { cursor decls              - 06-lib-sb   }
      (*$U FilerComm.obj *)      FilerComm,   { HandleFilerOp's types     - 06-lib-fc   }
-     (*$U MINESWEEPER-GLOBALS.OBJ *) MSGlobals,
-     (*$U MINESWEEPER-DRAW.OBJ *)    MSDraw; { DrawContents, for repainting the window }
+     (*$U MINESWEEPER/GLOBALS.OBJ *) MSGlobals,
+     (*$U MINESWEEPER/DRAW.OBJ *)    MSDraw; { DrawContents, for repainting the window }
                                              { under the panel on update events        }
 
 

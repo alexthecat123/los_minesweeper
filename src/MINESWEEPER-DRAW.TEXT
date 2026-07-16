@@ -46,7 +46,7 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
      (*$U Storage.obj *)        Storage,     { theHeap                   - 06-lib-qd-b }
      (*$U QuickDraw.obj *)      QuickDraw,   { every drawing call here   - 06-lib-qd-a }
      (*$U Fontmgr.obj *)        FontMgr,     { font family numbers       - 06-lib-fm   }
-     (*$U libos/SysCall.obj *)  SysCall,     { types used by MSGlobals   - 05-os-syscalls }
+     (*$U SysCall.obj *)  SysCall,     { types used by MSGlobals   - 05-os-syscalls }
      (*$U wm.events.obj *)      Events,      { WindowPtr                 - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,     { portRect access           - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,       { MenuInfo (via MSGlobals)  - 06-lib-wm-b }
@@ -54,7 +54,7 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
      (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
      (*$U WMlCrs.obj *)         WMLCrs,      { cursor decls              - 06-lib-sb   }
      (*$U FilerComm.obj *)      FilerComm,   { FilerExt (via MSGlobals)  - 06-lib-fc   }
-     (*$U MINESWEEPER-GLOBALS.OBJ *) MSGlobals;
+     (*$U MINESWEEPER/GLOBALS.OBJ *) MSGlobals;
 
 
 { ComputeLayout -- recompute contentW / contentH (MSGlobals) from the current }

@@ -42,7 +42,7 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
      (*$U dbenv.obj *)          dbenv,       { open-array types under FEdec }
      (*$U FEdec.obj *)          FEdec,       { field types (FETerminate lives on them) }
      (*$U fld.obj *)            fieldedit,   { FETerminate               - 06-lib-fe   }
-     (*$U libos/SysCall.obj *)  SysCall,     { processes, data segs, exceptions - 05-os-syscalls }
+     (*$U SysCall.obj *)        SysCall,     { processes, data segs, exceptions - 05-os-syscalls }
      (*$U wm.events.obj *)      Events,      { GetEvent, EventAvail, ImActive, Time - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,     { OpenWm, TakeControl, FolderSize ... - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,       { MenuSelect, MenuKey, CheckItem - 06-lib-wm-b }
@@ -50,10 +50,10 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
      (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
      (*$U WMlCrs.obj *)         WMLCrs,      { InitWmlCrs                - 06-lib-sb   }
      (*$U FilerComm.obj *)      FilerComm,   { TellFiler, DoFilingCmd    - 06-lib-fc   }
-     (*$U MINESWEEPER-GLOBALS.OBJ *) MSGlobals,
-     (*$U MINESWEEPER-GAME.OBJ *)    MSGame,
-     (*$U MINESWEEPER-DRAW.OBJ *)    MSDraw,
-     (*$U MINESWEEPER-DIALOG.OBJ *)  MSDialog;
+     (*$U MINESWEEPER/GLOBALS.OBJ *) MSGlobals,
+     (*$U MINESWEEPER/GAME.OBJ *)    MSGame,
+     (*$U MINESWEEPER/DRAW.OBJ *)    MSDraw,
+     (*$U MINESWEEPER/DIALOG.OBJ *)  MSDialog;
 { No WMLsb (scroll bars) and no WMLgrow (grow box): the window is exactly     }
 { board-sized and never scrolls or resizes by hand, so InitWmlSb/sbCreate     }
 { are never called and their units are not linked.  No FPlib/MathLib either:  }
@@ -842,8 +842,8 @@ var err, feErr : integer;
     junkErr    : integer;                { results of best-effort cleanup calls      }
     pcInfo     : procinfoRec;            { Info_Process's report - 05-os-syscalls 1.5 }
     excName    : t_ex_name;              { exception name, string[16] - 05-os-syscalls 1.7 }
-    myPrefix   : TParamAlert;            { "<stem>-{tNN}", derived below - 06-lib-am }
-    cutAt      : integer;                { index of the '}' in our own path }
+    myPrefix   : TParamAlert;            { "<stem>-tNN", derived below - 06-lib-am }
+    cutAt      : integer;                { index of the curly brace in our own path }
     dsPath     : pathname;               { the data segment's full name }
     segPtr     : longint;                { base address of the mapped segment }
     lv         : MSLevel;
@@ -883,12 +883,12 @@ begin
    Sched_Class(schedErr, true);
 
    { (5) THE TOOL-NUMBER-INDEPENDENT PREFIX (03-app-template section 5.5t).   }
-   { Our executable is installed as "<stem>-{TNN}Obj", so our own pathname    }
+   { Our executable is installed as "<stem>-TNNObj", so our own pathname      }
    { already contains our tool number.  Keep everything through the closing   }
-   { brace: "<stem>-{TNN}".  The phrase file and the data segment both hang   }
+   { brace: "<stem>-TNN".  The phrase file and the data segment both hang     }
    { off this prefix, so renaming the installed file to a different number    }
    { and re-running InstallTool renumbers the tool with ZERO source changes.  }
-   { (The shipped apps instead paste a literal '-{t12}' back on --            }
+   { (The shipped apps instead paste a literal '-t12' back on --              }
    { APHP-HP.TEXT:1971 and :2102 -- which is exactly why renumbering them     }
    { takes a rebuild.  Do not copy that.)                                     }
    cutAt := pos('}', pcInfo.progpathname);
@@ -897,7 +897,7 @@ begin
       { bare executable).  Over 40: the prefix cannot fit the TParamAlert     }
       { (string[40]) that InitMP takes -- pathologically deep folder, give    }
       { up rather than truncate to a wrong name.                              }
-      TellFiler(0, initFailed, internalError, nil);
+      TellFiler(err, initFailed, internalError, nil);
       halt
    end;
    myPrefix := copy(pcInfo.progpathname, 1, cutAt);
@@ -950,8 +950,8 @@ begin
    { Sched_Class(false)/(true) brackets because each can block on disk        }
    { (05-os-syscalls; 03-app-template section 5.1).                           }
    dsPath := concat(myPrefix, 'data segment');
-   { -> "<stem>-{TNN}data segment", matching the Calculator's naming          }
-   {    ('-{t12}data segment') but with the number coming from OUR path.      }
+   { -> "<stem>-TNNdata segment", matching the Calculator's naming            }
+   {    ('-T12data segment') but with the number coming from OUR path.        }
 
    useDefaults := false;
    Sched_Class(schedErr, false);

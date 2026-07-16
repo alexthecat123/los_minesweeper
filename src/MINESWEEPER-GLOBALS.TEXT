@@ -44,7 +44,7 @@ uses (*$U UnitStd.obj *)        UnitStd,    { base types: TC, TB, TP ...        
      (*$U Storage.obj *)        Storage,    { theHeap, NewHandle, InitHeap      - 06-lib-qd-b }
      (*$U QuickDraw.obj *)      QuickDraw,  { Rect, Point, Str255, drawing      - 06-lib-qd-a }
      (*$U Fontmgr.obj *)        FontMgr,    { font family numbers (tile12 ...)  - 06-lib-fm   }
-     (*$U libos/SysCall.obj *)  SysCall,    { processes, data segs, exceptions  - 05-os-syscalls }
+     (*$U SysCall.obj *)        SysCall,    { processes, data segs, exceptions  - 05-os-syscalls }
      (*$U wm.events.obj *)      Events,     { EventRecord, GetEvent, Time ...   - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,    { windows, TakeControl, updates     - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,      { MenuInfo, InsertMenu, MenuSelect  - 06-lib-wm-b }

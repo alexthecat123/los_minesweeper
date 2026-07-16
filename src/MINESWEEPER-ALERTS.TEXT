@@ -100,6 +100,10 @@ Reset all best times?  The record book will be emptied.
 ; Number-only headers: stageless, exactly ONE verbatim text line each, no
 ; escape expansion; fetched with GetAlert (06-lib-am).  901-909 are reserved
 ; for DTAlert, so the visible ones start at 910.
+; Each still needs its OWN terminating blank line: AlertGen reads text lines
+; until a blank one, and a comment line does NOT end the text -- without the
+; blank, the next phrase's number is read as a second text line and the tool
+; stops with "Only one line of text allowed when no severity".
 ;
 ; -- 900: the Field Editor "word triples" for double-click word selection
 ;    (FEInit; 06-lib-fe 'qualifies').  Groups of four: <left><this><right>
@@ -111,19 +115,25 @@ Reset all best times?  The record book will be emptied.
 ;    together on double-click.
 900
 xAx x9x x$x x%x x.9 x.% 9,9 A'A A-A A.A
+
 ; -- 910-912: the Custom dialog's field labels.  Each doubles as the ^2 of
 ;    alert 50 ("...is not a valid Width...").
 910
 Width
+
 911
 Height
+
 912
 Mines
+
 ; -- 913/914: the two dialog titles.
 913
 Custom Level
+
 914
 A new record!  Type your name for the book:
+
 ; -- 915: the Best Times line for a level nobody has won yet.
 915
 no best time yet

@@ -21,11 +21,11 @@ $SUBMIT MINESWEEPER/COMP
 $SUBMIT MINESWEEPER/LINK
 ${                                                                            }
 ${ Install the executable under its tool name.                                }
-F{ilemgr}
-  D{elete}~{T201~}Obj     Y{es}
-  D{elete}~{T201~}PHRASE  Y{es}
-  C{opy}MINESWEEPER/MINESWEEPER.OBJ  ~{T201~}Obj
-  Q{uit}
+F{ilemgr}D{elete}~{T201~}Obj
+Y{es}D{elete}~{T201~}PHRASE
+Y{es}C{opy}MINESWEEPER/MINESWEEPER.OBJ
+~{T201~}Obj
+Q{uit}
 ${                                                                            }
 ${ Compile the phrase file straight to its installed name: the Alert tool     }
 ${ takes the source and an output STEM, appending 'PHRASE' itself, so the     }
