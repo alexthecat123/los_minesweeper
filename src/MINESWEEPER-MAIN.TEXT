@@ -68,6 +68,25 @@ const
                      { shared WM segment at ldsn 15).  2 is what the           }
                      { Calculator dedicates to its own segment.                }
 
+   clkPollDelay = 20;   { How long UpdateTimer waits between reads of the real }
+                        { clock, in hundredths of a second on the WM's Time    }
+                        { scale.  See UpdateTimer for why there is a gate at   }
+                        { all.  20 = five reads a second, so the displayed     }
+                        { second can be at most a fifth of a second late --    }
+                        { far below what an eye can catch on a digit that only }
+                        { changes once a second -- while costing a fifth of a  }
+                        { percent of the syscalls the ungated version made.    }
+                        { The delay is measured with the CPU-speed clock, so   }
+                        { on this overclocked machine the real interval is     }
+                        { SHORTER than 0.2s.  That is the harmless direction:  }
+                        { it polls somewhat more often than intended, never    }
+                        { less, and the reading itself stays exact because it  }
+                        { comes from Get_Time.                                 }
+
+var
+   nextClkPoll : longint;   { Time value at which UpdateTimer may next read    }
+                            { the real clock; see clkPollDelay above.          }
+
 
 {==============================================================================}
 {  The three required callbacks (03-app-template section 10)                   }
@@ -231,6 +250,22 @@ end;
 {  Minesweeper needs NO timer subprocess: the Clock spawns one because it     }
 {  must tick while INACTIVE; our timer only needs to tick while the player    }
 {  is actually playing, i.e. while we are active and pumping Phase B.         }
+{                                                                              }
+{  "CHEAP" is not decoration.  The idle branch runs flat out -- thousands of  }
+{  passes a second between events -- so anything done here is done thousands  }
+{  of times a second.  UpdateElapsed reads the real clock with Get_Time, an   }
+{  OS syscall, and a syscall per pass is enough to make the machine feel      }
+{  sticky under the hand: the cursor stutters, because the WM is fighting us  }
+{  for the CPU we are spending on a number that changes once a second.        }
+{                                                                              }
+{  Hence the gate.  Time (the WM's boot-relative counter, 06-lib-wm-a) is a   }
+{  cheap read, so we use IT to decide when to spend a Get_Time -- five times  }
+{  a second, not thousands.  Note what this does and does not do: the gate    }
+{  controls only HOW OFTEN we look at the clock, never WHAT WE READ when we   }
+{  do.  Every displayed second still comes from Get_Time, so the CPU clock's  }
+{  speed cannot get into the elapsed figure -- which was the whole point of   }
+{  moving off Time in the first place.  A fast Time makes us poll a little    }
+{  more often than intended and changes nothing else.                         }
 {------------------------------------------------------------------------------}
 
 procedure UpdateTimer;
@@ -238,8 +273,14 @@ var oldSecs : integer;
 begin
    if myWindow = nil then exit(UpdateTimer);       { no window, nothing to draw }
    if myDoc^.state <> msPlaying then exit(UpdateTimer);
+
+   { The gate.  Both tests are integer compares against values already in     }
+   { hand; the expensive call is on the far side of them.                     }
+   if Time < nextClkPoll then exit(UpdateTimer);
+   nextClkPoll := Time + clkPollDelay;
+
    oldSecs := myDoc^.elapsed;
-   UpdateElapsed;
+   UpdateElapsed;                        { <- the Get_Time lives in here }
    if myDoc^.elapsed <> oldSecs then
       DrawTimer                          { repaints ONLY the digits (MSDraw) }
 end;
@@ -425,11 +466,24 @@ end;
 {  tells the story (every mine exposed, the fatal one inverted, wrong flags   }
 {  crossed out -- MSDraw), the face dies, and a medium beep marks the moment  }
 {  (BeepAlert honours the user's beep-vs-flash preference, 06-lib-am).        }
+{                                                                              }
+{  It is worth being clear about what "every mine exposed" costs, because it   }
+{  is the one moment that looks like it needs the whole board: it does not.    }
+{  A loss changes the mines and the wrong flags.  It does not change the       }
+{  numbers the player already opened, and it does not change the covers over   }
+{  the empty cells they never got to -- those are most of the board, and they  }
+{  are already correct on the screen.  So this goes through the dirty list     }
+{  like every other move.                                                      }
 {------------------------------------------------------------------------------}
 
 procedure DoLose;
 begin
-   DrawBoard;                            { shows all mines now that state = msLost }
+   DrawDirtyCells;                       { the mines and the wrong flags -- and   }
+                                         { only those.  RevealCell marked them    }
+                                         { when it set state := msLost; see the   }
+                                         { note there for which cells a loss      }
+                                         { actually changes and which it leaves    }
+                                         { looking exactly as they already did.    }
    DrawFace(false);                      { X eyes }
    BeepAlert(2)                          { medium: audible but not alarming }
 end;
@@ -907,6 +961,7 @@ begin
    lastClkTime := 0;
    lastClkCol  := 0;
    lastClkRow  := 0;
+   nextClkPoll := 0;        { 0 is in the past: the first idle pass polls at once }
    ClearDirty;              { no cell is owed a repaint before a board exists }
 
    { (3) The private heap, carved out of the static myZone array.  Everything }

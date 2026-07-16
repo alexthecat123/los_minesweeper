@@ -77,7 +77,7 @@ You swept all ^1 mines in ^2 seconds.
 ; -- Best Times.  ^1/^2/^3 are one preformatted line per fixed level
 ;    ("012  Alex", or phrase 915's text when a level has no record yet).
 30 note alert
-The best times so far --^L^L
+The best times so far!!!^L^L
 Beginner:  ^1^L
 Intermediate:  ^2^L
 Expert:  ^3
@@ -136,7 +136,7 @@ A new record!  Type your name for the book:
 
 ; -- 915: the Best Times line for a level nobody has won yet.
 915
-no best time yet
+No best time yet...
 
 0
 ; ==== MENUS ==================================================================
@@ -149,7 +149,7 @@ no best time yet
 1
 File/Print
 Set Aside Everything
-Set Aside
+Set Aside "Minesweeper"
 -
 Save & Put Away
 

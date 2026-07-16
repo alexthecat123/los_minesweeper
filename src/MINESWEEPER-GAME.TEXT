@@ -283,11 +283,26 @@ begin
          fatalRow := r;
          state := msLost;
          MarkDirty(c, r);
-         { Only this cell is marked, but a loss changes far more than one cell }
-         { (every hidden mine appears, every wrong flag gets an X): the caller }
-         { redraws the whole board for a loss and the marks are irrelevant.    }
-         { We mark anyway so that this routine's contract holds without an     }
-         { exception -- "a cell I changed is always marked".                   }
+
+         { A loss changes more cells than the one that was clicked, without    }
+         { touching their data at all: MSDraw reads state = msLost and paints  }
+         { the hidden mines through their covers, and X's out the flags that   }
+         { turned out to be wrong.  The cells did not change -- what they LOOK }
+         { LIKE did -- so nothing else in this routine would ever mark them,   }
+         { and this is the one place that knows the loss just happened.        }
+         {                                                                     }
+         { Exactly which cells?  The ones where isMine and isFlagged DISAGREE. }
+         { An unflagged mine was a blank cover a moment ago and is a mine now; }
+         { a flagged blank was a flag and is now a mine with a line through    }
+         { it.  The other two combinations are already telling the truth: a    }
+         { correctly flagged mine still shows the same flag it showed before   }
+         { the loss, and a plain covered blank stays a plain covered blank.    }
+         { Leaving those two alone is what keeps this cheap -- on a full       }
+         { Expert board it is 99 mines and a few bad flags, not 480 cells.     }
+         for rr := 1 to rows do
+            for cc := 1 to cols do
+               if cells[rr, cc].isMine <> cells[rr, cc].isFlagged then
+                  MarkDirty(cc, rr);
          exit(RevealCell)
       end;
 

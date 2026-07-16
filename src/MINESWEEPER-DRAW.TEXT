@@ -85,18 +85,20 @@ procedure FaceRect (var box : Rect);
 procedure DrawCell (c, r : integer);
 
 { DrawDirtyCells -- repaint exactly the cells MSGame marked with MarkDirty    }
-{ since the last repaint, and clear the marks.  This is the normal way the    }
-{ board is updated after a move: a reveal that opens three cells costs three  }
-{ cells of drawing.  Reach for DrawBoard only when something really did       }
-{ change the whole board.                                                     }
+{ since the last repaint, and clear the marks.  This is how EVERY move        }
+{ reaches the screen: a reveal that opens three cells costs three cells of    }
+{ drawing, and a loss costs the mines and the wrong flags.  If you are adding }
+{ a move that changes the board, mark what you change and call this -- do not }
+{ reach for DrawBoard, which exists for a different problem (see it).         }
 procedure DrawDirtyCells;
 
-{ DrawBoard -- repaint every cell plus the 1-pixel frame.  Used when the      }
-{ whole board genuinely changes: a new game, or a loss (which exposes every   }
-{ mine and X's out every wrong flag -- changes MSGame does not model as cell  }
-{ state at all, so the dirty list cannot see them).  540 cells of QuickDraw   }
-{ takes a visible moment on a 68000, which is precisely why the ordinary      }
-{ move goes through DrawDirtyCells instead.                                   }
+{ DrawBoard -- repaint every cell plus the 1-pixel frame.  For when the       }
+{ SCREEN, not the board, is what is out of date: the first paint of a window  }
+{ and the update events (both through DrawContents), where the pixels are     }
+{ gone and every cell must be put back regardless of whether the game         }
+{ changed it.  540 cells of QuickDraw takes a visible moment on a 68000, so   }
+{ no MOVE should ever come through here -- not even a loss, which changes     }
+{ only the mines and the wrong flags.  Moves use DrawDirtyCells.              }
 procedure DrawBoard;
 
 { DrawCounter -- the left-hand 3-digit readout: mines minus flags.            }
@@ -567,12 +569,29 @@ begin
       SetRect(ii, cx - 2, cy + 1, cx + 2, cy + 4);  FrameOval(ii)
    end
    else if myDoc^.state = msLost then begin
-      { DEAD -- X eyes and a frown.  Each X is two crossed 3-pixel strokes.   }
+      { DEAD -- X eyes and a frown.  Each X is two crossed 3-pixel strokes,   }
+      { rasterising to a 4 x 3 hourglass:  # . . #                            }
+      {                                    . # # .                            }
+      {                                    # . . #                            }
+      {                                                                       }
+      { KEEP THESE EYES OFF THE FACE OUTLINE.  There is nothing else near     }
+      { them to collide with, and the oval is closer than it looks: the face  }
+      { is 18 x 12, so at the eyes' rows it is much narrower than its full    }
+      { width, and a point is only inside it when (dx/9)^2 + (dy/6)^2 < 1.    }
+      { The original eyes ran to (cx-6, cy-4), which puts that corner at      }
+      { sqrt(4/9 + 4/9) = 94% of the way from the centre to the edge -- so    }
+      { the outline curved over the top of each eye a pixel away and read as  }
+      { an EYEBROW, while merging into the eye's outer corner and turning the }
+      { hourglass into a triangle.  Both are gone once the eyes move in and   }
+      { down: the corner (cx-5, cy-3) sits at sqrt(25/81 + 1/4) = 75%, which  }
+      { leaves about three pixels of white between eye and outline.  Their    }
+      { rows now also match the smiling face's dot eyes, so the two faces     }
+      { look at you from the same place.                                      }
       PenNormal;
-      MoveTo(cx - 6, cy - 4);  LineTo(cx - 3, cy - 2);
-      MoveTo(cx - 3, cy - 4);  LineTo(cx - 6, cy - 2);
-      MoveTo(cx + 3, cy - 4);  LineTo(cx + 6, cy - 2);
-      MoveTo(cx + 6, cy - 4);  LineTo(cx + 3, cy - 2);
+      MoveTo(cx - 5, cy - 3);  LineTo(cx - 2, cy - 1);
+      MoveTo(cx - 2, cy - 3);  LineTo(cx - 5, cy - 1);
+      MoveTo(cx + 2, cy - 3);  LineTo(cx + 5, cy - 1);
+      MoveTo(cx + 5, cy - 3);  LineTo(cx + 2, cy - 1);
       { The frown is the smile's mirror image: the TOP half of a mouth oval    }
       { instead of the bottom, so it bows upward.  Angles run clockwise from   }
       { 12 o'clock, so (270, 180) sweeps 9 -> 12 -> 3 (06-lib-qd-a section     }
@@ -602,8 +621,16 @@ begin
    end
    else begin
       { SMILING -- the default: dot eyes and the same lower-half-arc smile.   }
-      SetRect(ii, cx - 5, cy - 4, cx - 3, cy - 2);  PaintOval(ii);
-      SetRect(ii, cx + 3, cy - 4, cx + 5, cy - 2);  PaintOval(ii);
+      { Eyes on rows cy-3..cy-1, which is where the worried face above has    }
+      { always had its eyes and where the dead face's X's have now joined     }
+      { them.  ALL FOUR FACES SHARE THOSE ROWS, and they should: they are     }
+      { the same face wearing different expressions, drawn one on top of the  }
+      { other as the game changes state, so eyes that shift between states    }
+      { read as the face flinching rather than as the mouth changing.  This   }
+      { face was the one that used to be out of step (it sat a pixel higher,  }
+      { on cy-4..cy-2), which is exactly how it got noticed.                  }
+      SetRect(ii, cx - 5, cy - 3, cx - 3, cy - 1);  PaintOval(ii);
+      SetRect(ii, cx + 3, cy - 3, cx + 5, cy - 1);  PaintOval(ii);
       SetRect(ii, cx - 4, cy - 2, cx + 4, cy + 4);
       FrameArc(ii, 90, 180)
    end
