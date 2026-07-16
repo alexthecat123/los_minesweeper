@@ -22,9 +22,12 @@
 ; =============================================================================
 ;
 ; ---- FILE HEADER ------------------------------------------------------------
-; Version stamp: any integer; compared at run time against alertVerNum (= 2)
+; Version stamp: any integer; compared at run time against alertVerNum (= 3)
 ; in MSGlobals -- a mismatch is only warning -3076.  Bump both together.
-2
+; (Bumped 2 -> 3 when the printing items, alert 60 and the scrap menu were
+; added: an old PHRASE file has no menu 5, and inserting a menu that InitMP
+; never filled in would crash, so the stamp records the pairing.)
+3
 ; cacheSize: resident alert-text slots, and cacheBytes: the cache's heap byte
 ; budget.  InitMP reads these two lines and passes them to InitAlerts.
 ; *** ESTIMATES.  The Alert tool prints suggested InitAlerts(slots, bytes,..)
@@ -96,6 +99,17 @@ Reset all best times?  The record book will be emptied.
 50 stop soft; medium alert
 "^1" is not a valid ^2.  It must be a whole number between ^3 and ^4.
 
+; -- Printing: the picture staging area could not be made (the scratch data
+;    segment, or the picture inside it -- DoPrintBoard in MINESWEEPER-MAIN).
+;    The Printer Library shows its own alerts for everything past that point
+;    (spooling, disk-full, no printer -- they live in System.Pr., 06-lib-pr-a),
+;    so this one alert covers the only failure that is OURS to report.
+60 stop alert
+Minesweeper could not get enough room on the startup disk to prepare the
+picture it prints.  You may be able to make more room on this disk.  Refer
+to the Lisa Office System manual, Appendix A, Office System Error Messages,
+under Insufficient Room on Disk.
+
 ; ==== GET PHRASES ============================================================
 ; Number-only headers: stageless, exactly ONE verbatim text line each, no
 ; escape expansion; fetched with GetAlert (06-lib-am).  901-909 are reserved
@@ -140,18 +154,28 @@ No best time yet...
 
 0
 ; ==== MENUS ==================================================================
-; Read by InitMP into myMenus[1..4].  Each block: menuId, title (verbatim --
+; Read by InitMP into myMenus[1..5].  Each block: menuId, title (verbatim --
 ; the '/' in "File/Print" is title text, NOT a modifier), then one item per
 ; line ('/X' = Apple-key equivalent, a lone '-' = disabled separator that
-; still occupies an item number), ended by a blank line.  Ids 1..4 match
-; mFile/mEdit/mGame/mLevel in MSGlobals; wording follows the Calculator's
-; menus (aphp-T12ALERT.TEXT), including the house-style space before "...".
+; still occupies an item number), ended by a blank line.  Ids 1..5 match
+; mFile/mEdit/mGame/mLevel/mScrap in MSGlobals; wording follows the
+; Calculator's menus (aphp-T12ALERT.TEXT), including the house-style space
+; before "...".  The Calculator's File/Print reads: Set Asides, Save & Put
+; Away, then "Format for Printer ...", its print command, "Monitor the
+; Printer ..." -- ours is the same shape.  "Print ..." wears the "..."
+; because it raises the copies dialog first (FPrInsDlg, 06-lib-pr-a); the
+; Calculator's tape command prints immediately (ePrDialogSuppress,
+; APHP-HP.TEXT:4267) and so goes bare.
 1
 File/Print
 Set Aside Everything
 Set Aside "Minesweeper"
 -
 Save & Put Away
+-
+Format for Printer ...
+Print ...
+Monitor the Printer ...
 
 2
 Edit
@@ -177,5 +201,21 @@ Intermediate
 Expert
 -
 Custom Level ...
+
+; -- Menu 5: the SCRAP window's whole menu bar.  Once Copy makes this process
+;    the scrap's owner, activating the scrap window sends US the
+;    folderActivate, and whatever menus we put up are the ones the user gets
+;    (06-lib-su-a section 2, "Ownership").  The Calculator keeps exactly this
+;    reduced File/Print for that case -- its menu 7, installed by its
+;    PutUpMenus when theEvent.who is not its own window (aphp-T12ALERT.TEXT
+;    menu 7; APHP-HP.TEXT:3624-3630).  The quoted name is baked in like
+;    "Minesweeper" above (the Clock's fixed-name style; both strings localize
+;    together in this file).
+5
+File/Print
+Set Aside Everything
+Set Aside "the Scrap"
+-
+Monitor the Printer ...
 
 0

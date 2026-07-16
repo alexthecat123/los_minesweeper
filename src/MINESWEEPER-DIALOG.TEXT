@@ -81,12 +81,20 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
                                              { -- unit and file names differ           }
                                              { (02-workshop-build 5.2)                 }
      (*$U SysCall.obj *)        SysCall,     { (via MSGlobals)           - 05-os-syscalls }
-     (*$U wm.events.obj *)      Events,      { GetEvent, Time, clickDelay - 06-lib-wm-a }
+     (*$U UnitFile.obj *)       UnitFile,    { (via MSDraw: the Scrap's file layer) }
+     (*$U PMDecl.obj *)         PMDecl,      { (PrStdInfo and Scrap need it) - 06-lib-pm }
+     (*$U PrStdInfo.obj *)      PrStdInfo,   { TPrRec (via MSGlobals)    - 06-lib-pr-a }
+     (*$U PrPublic.obj *)       PrPublic,    { (via MSGlobals)           - 06-lib-pr-a }
+     (*$U wm.events.obj *)      Events,      { GetEvent, Time, clickDelay, scrapFolder - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,     { TakeControl, BeginUpdate  - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,       { MenuSelect, EnableMenu    - 06-lib-wm-b }
      (*$U AlertMgr.obj *)       AlertMgr,    { GetAlert, GetButn, StopAlert - 06-lib-am }
      (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
      (*$U WMlCrs.obj *)         WMLCrs,      { cursor decls              - 06-lib-sb   }
+     (*$U UnitFmt.obj *)        UnitFmt,     { (via MSDraw)              - 06-lib-su-b }
+     (*$U UnitCs.obj *)         UnitCs,      { (via MSDraw)              - 06-lib-su-b }
+     (*$U UnitFf.obj *)         UnitFf,      { (via MSDraw)              - 06-lib-su-b }
+     (*$U scrap.obj *)          Scrap,       { (via MSDraw: CurrScrapSet) - 06-lib-su-a }
      (*$U FilerComm.obj *)      FilerComm,   { HandleFilerOp's types     - 06-lib-fc   }
      (*$U MINESWEEPER/GLOBALS.OBJ *) MSGlobals,
      (*$U MINESWEEPER/DRAW.OBJ *)    MSDraw; { DrawContents, for repainting the window }
@@ -476,9 +484,12 @@ begin
       EnableMenu(myMenus[mFile]);
       EnableMenu(myMenus[mGame]);
       EnableMenu(myMenus[mLevel]);
-      DisableItem(myMenus[mEdit], miUndo);   { the Edit menu sleeps again: it }
-      DisableItem(myMenus[mEdit], miCut);    { only ever acts on a field      }
-      DisableItem(myMenus[mEdit], miCopy);
+      DisableItem(myMenus[mEdit], miUndo);   { Undo/Cut/Paste sleep again:    }
+      DisableItem(myMenus[mEdit], miCut);    { they only ever act on a field  }
+      EnableItem(myMenus[mEdit], miCopy);    { ... but Copy stays awake: at   }
+                                             { the board it copies the board  }
+                                             { picture to the Scrap (the main }
+                                             { program's DoCopyBoard)         }
       DisableItem(myMenus[mEdit], miPaste)
    end;
    DrawMenuBar                            { repaint the (dimmed) titles; no-op }
@@ -497,8 +508,9 @@ procedure PutUpDlgMenus;
 var mm : integer;
 begin
    ClearMenuBar;
-   for mm := mFile to lastMenu do
-      InsertMenu(myMenus[mm], 0);         { 0 = append at the right - 06-lib-wm-b }
+   for mm := mFile to lastBarMenu do      { mFile..mLevel, like the main       }
+      InsertMenu(myMenus[mm], 0);         { program's PutUpMenus; the scrap    }
+                                          { menu is only for the scrap window  }
    SetDlgMenuState(true)                  { ends with DrawMenuBar }
 end;
 
@@ -752,11 +764,19 @@ begin
 
       buttonDown :
          if theEvent.who = menuFolder then begin
-            { A menu-bar pull.  Only Edit is enabled (SetDlgMenuState);       }
-            { MenuSelect returns 0,0 for anything disabled (06-lib-wm-b).     }
+            { A menu-bar pull.  In OUR window's bar only Edit is enabled      }
+            { (SetDlgMenuState); MenuSelect returns 0,0 for anything          }
+            { disabled (06-lib-wm-b).  But if the user activated the SCRAP    }
+            { window mid-dialog (the panel locks only our window), the bar    }
+            { up right now is the scrap menu -- fully enabled, and dispatched }
+            { by the same shared handler the main loop uses.                  }
             MenuSelect(theEvent.where, theMenu, theItem);
             if (theMenu = mEdit) and (theItem <> 0) then
-               DoDlgEditCommand(theItem);
+               DoDlgEditCommand(theItem)
+            else if (theMenu = mScrap) and (theItem <> 0) then
+               ScrapMenuCommand(theItem);
+            { A Set Aside from there comes back as an fcClose filerEvent,     }
+            { which the filerEvent arm below already folds into a Cancel.     }
             HiLiteMenu(0)                 { un-highlight the title afterwards }
          end
          else if theEvent.who = myWindow then begin
@@ -845,15 +865,22 @@ begin
       folderActivate :
          begin
             { The standard activate handshake, dialog flavour: complete the   }
-            { WM handshake, rebuild OUR menu bar (with the dialog gray        }
-            { state), and un-dim the field selection (06-lib-wm-a             }
-            { TakeControl; 06-lib-fe ChangeSelHilight).                       }
+            { WM handshake, rebuild the menu bar, and un-dim the field        }
+            { selection (06-lib-wm-a TakeControl; 06-lib-fe                   }
+            { ChangeSelHilight).  WHICH bar depends on which of our windows   }
+            { is going active: after a Copy we also own the scrap window,     }
+            { and its activation must show the scrap's menu, dialog or no     }
+            { dialog (same branch the main loop makes).                       }
             TakeControl(theEvent, false, false);
-            PutUpDlgMenus;
-            if curFld <> nil then begin
-               SetPort(myWindow);
-               ClipRect(myWindow^.portRect);
-               ChangeSelHilight(curFld, dlgFSH, false)    { bright again }
+            if theEvent.who = scrapFolder then
+               PutUpScrapMenus
+            else begin
+               PutUpDlgMenus;
+               if curFld <> nil then begin
+                  SetPort(myWindow);
+                  ClipRect(myWindow^.portRect);
+                  ChangeSelHilight(curFld, dlgFSH, false)    { bright again }
+               end
             end
          end;
 
@@ -871,7 +898,12 @@ begin
          end;
 
       folderUpdate :
-         begin
+         if theEvent.who = scrapFolder then
+            { The scrap window we own was damaged; it draws its own contents  }
+            { (DrawScrapWindow brackets with BeginUpdate itself).  Painting   }
+            { the BOARD into it -- the else-arm below -- would be wrong.      }
+            DrawScrapWindow(true)
+         else begin
             { Redraw the damaged area: window contents first, panel on top.   }
             { BeginUpdate clips everything to the damage, so this is cheap    }
             { even though it names the whole window (06-lib-wm-a).            }

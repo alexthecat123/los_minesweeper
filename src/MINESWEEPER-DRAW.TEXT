@@ -29,11 +29,15 @@
 {    - the whole board wears a 1-pixel black frame so it sits ON the window    }
 {      instead of floating in it.                                              }
 {                                                                              }
-{  Every public routine here sets the port itself (SetPort(myWindow)) and      }
-{  no-ops when myWindow = nil (window given back to the Filer): callers        }
-{  never have to think about port state.  QuickDraw clips everything to        }
-{  visRgn * clipRgn, so drawing during an update is automatically limited      }
-{  to the damaged area (06-lib-qd-a, 06-lib-wm-a BeginUpdate).                 }
+{  Every public routine here sets the port itself and no-ops when there is     }
+{  nowhere to draw: callers never have to think about port state.  The port    }
+{  is normally myWindow, but RenderImage can redirect one whole repaint at     }
+{  any other port through imagePort/TargetPort (see them below) -- that is     }
+{  how the SAME code paints the window, records the Copy picture for the       }
+{  Scrap, and records the picture Print scales onto paper.  QuickDraw clips    }
+{  everything to visRgn * clipRgn, so drawing during an update is              }
+{  automatically limited to the damaged area (06-lib-qd-a, 06-lib-wm-a         }
+{  BeginUpdate).                                                               }
 {                                                                              }
 {==============================================================================}
 
@@ -46,13 +50,29 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
      (*$U Storage.obj *)        Storage,     { theHeap                   - 06-lib-qd-b }
      (*$U QuickDraw.obj *)      QuickDraw,   { every drawing call here   - 06-lib-qd-a }
      (*$U Fontmgr.obj *)        FontMgr,     { font family numbers       - 06-lib-fm   }
-     (*$U SysCall.obj *)  SysCall,     { types used by MSGlobals   - 05-os-syscalls }
-     (*$U wm.events.obj *)      Events,      { WindowPtr                 - 06-lib-wm-a }
+     (*$U dbenv.obj *)          dbenv,       { open-array types under FEdec }
+     (*$U FEdec.obj *)          FEdec,       { field types (DrawScrap's world) - 06-lib-fe }
+     (*$U fld.obj *)            fieldedit,   { DrawScrap: the FE scrap-window  }
+                                             { repaint (06-lib-fe 3.10)        }
+     (*$U SysCall.obj *)        SysCall,     { types used by MSGlobals   - 05-os-syscalls }
+     (*$U UnitFile.obj *)       UnitFile,    { the Scrap's file layer (its interface }
+                                             { needs it first) - 06-lib-su-b         }
+     (*$U PMDecl.obj *)         PMDecl,      { (PrStdInfo and Scrap need it) - 06-lib-pm }
+     (*$U PrStdInfo.obj *)      PrStdInfo,   { TPrRec (via MSGlobals)    - 06-lib-pr-a }
+     (*$U PrPublic.obj *)       PrPublic,    { (via MSGlobals)           - 06-lib-pr-a }
+     (*$U wm.events.obj *)      Events,      { WindowPtr, scrapFolder    - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,     { portRect access           - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,       { MenuInfo (via MSGlobals)  - 06-lib-wm-b }
      (*$U AlertMgr.obj *)       AlertMgr,    { TAlertFile (via MSGlobals) - 06-lib-am  }
      (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
      (*$U WMlCrs.obj *)         WMLCrs,      { cursor decls              - 06-lib-sb   }
+     (*$U UnitFmt.obj *)        UnitFmt,     { the Scrap's format layer  - 06-lib-su-b }
+     (*$U UnitCs.obj *)         UnitCs,      { the Scrap's stream layer  - 06-lib-su-b }
+     (*$U UnitFf.obj *)         UnitFf,      { the Scrap's file classes  - 06-lib-su-b }
+     (*$U scrap.obj *)          Scrap,       { CurrScrapSet, DrawUScrap  - 06-lib-su-a }
+     { This uses-list mirrors LisaWrite's proven minimal client list for the   }
+     { Scrap (aplw-unitscrap.text:44-66): every unit the Scrap's INTERFACE     }
+     { types actually reach, and nothing more.                                 }
      (*$U FilerComm.obj *)      FilerComm,   { FilerExt (via MSGlobals)  - 06-lib-fc   }
      (*$U MINESWEEPER/GLOBALS.OBJ *) MSGlobals;
 
@@ -122,6 +142,26 @@ procedure DrawStatusBar;
 { (03-app-template section 9.1), and InitNewDoc calls for the first paint.    }
 procedure DrawContents (window : WindowPtr);
 
+{ RenderImage -- the same full repaint, aimed at ANY port: the board image    }
+{ "everything but the window frame" that Copy and Print both need.  Points    }
+{ imagePort (MSGlobals) at the target so every routine above lands there,     }
+{ draws status bar + board into rect (0,0,contentW,contentH), and restores.   }
+{ Called with myWindow it IS DrawContents; called while a picture is open on  }
+{ that port it records instead of painting (OpenPicture hides the pen --      }
+{ libqd-PICTURES.TEXT:187 -- so recording never disturbs the screen).         }
+procedure RenderImage (port : GrafPtr);
+
+{ DrawScrapWindow -- service a folderUpdate for the SCRAP window.  Once Copy  }
+{ (or a dialog-field Cut/Copy) makes this process the scrap's owner, the      }
+{ scrap window's update events arrive HERE, and drawing our board into it     }
+{ (which is what the plain update path would do) would be wrong.  The scrap   }
+{ knows how to draw itself: DrawUScrap for a picture (06-lib-su-a), the       }
+{ Field Editor's DrawScrap for a copied field (06-lib-fe 3.10) -- the same    }
+{ two-way branch the Calculator's DrawContents makes for its scrap folder     }
+{ (APHP-HP.TEXT:1315-1321).  normal = true brackets with BeginUpdate /        }
+{ EndUpdate exactly like doUpdateEvent.                                       }
+procedure DrawScrapWindow (normal : boolean);
+
 
 IMPLEMENTATION
 
@@ -137,6 +177,22 @@ const
    wellPad  = 5;     { white pixels between the well frame and the digits      }
    faceW    = 33;    { reset button 33 x 22 -- 3:2, so it reads as a square    }
    faceH    = 22;    {   (33 * 2/3 = 22; see the aspect-ratio rule above)      }
+
+{------------------------------------------------------------------------------}
+{  TargetPort -- the port this unit draws into: imagePort while RenderImage    }
+{  is redirecting a repaint (recording the Copy or Print picture), myWindow    }
+{  the rest of the time.  nil means "nowhere to draw" -- the window is back    }
+{  with the Filer and no redirection is up -- and every public routine exits   }
+{  on it, which is the same no-window guard they always had.  (WindowPtr and   }
+{  GrafPtr are the same type -- a window IS a grafPort, 06-lib-wm-a -- so no   }
+{  cast.)                                                                      }
+{------------------------------------------------------------------------------}
+
+function TargetPort : GrafPtr;
+begin
+   if imagePort <> nil then TargetPort := imagePort
+   else TargetPort := myWindow
+end;
 
 {------------------------------------------------------------------------------}
 procedure ComputeLayout;
@@ -388,8 +444,8 @@ var box   : Rect;
     inner : Rect;
     showMine : boolean;
 begin
-   if myWindow = nil then exit(DrawCell);      { window went back to the Filer }
-   SetPort(myWindow);                          { all drawing needs a port - 06-lib-qd-a }
+   if TargetPort = nil then exit(DrawCell);    { nowhere to draw (see TargetPort) }
+   SetPort(TargetPort);                        { all drawing needs a port - 06-lib-qd-a }
    CellRect(c, r, box);
 
    with myDoc^ do begin
@@ -491,8 +547,8 @@ procedure DrawBoard;
 var c, r  : integer;
     frame : Rect;
 begin
-   if myWindow = nil then exit(DrawBoard);
-   SetPort(myWindow);
+   if TargetPort = nil then exit(DrawBoard);
+   SetPort(TargetPort);
 
    for r := 1 to myDoc^.rows do
       for c := 1 to myDoc^.cols do
@@ -501,7 +557,11 @@ begin
    { Every cell is now on the screen exactly as the document describes it, so  }
    { nothing is owed a repaint.  Clearing here is what lets a caller reach     }
    { for DrawBoard without also having to think about the dirty list.          }
-   ClearDirty;
+   { UNLESS the repaint was redirected somewhere that is not the screen        }
+   { (recording a Copy/Print picture): the marks say what the WINDOW owes the  }
+   { document, and painting a picture pays none of that debt.                  }
+   if (imagePort = nil) or (imagePort = myWindow) then
+      ClearDirty;
 
    { The 1-pixel black frame, one pixel OUTSIDE the cells, so the board sits  }
    { on the window instead of floating.  FrameRect draws INSIDE its rect,     }
@@ -517,8 +577,8 @@ end;
 procedure DrawCounter;
 var well : Rect;
 begin
-   if myWindow = nil then exit(DrawCounter);
-   SetPort(myWindow);
+   if TargetPort = nil then exit(DrawCounter);
+   SetPort(TargetPort);
    CounterWell(well);
    DrawWell(well);
    { mines minus flags: the player's running estimate of what is left.        }
@@ -529,8 +589,8 @@ end;
 procedure DrawTimer;
 var well : Rect;
 begin
-   if myWindow = nil then exit(DrawTimer);
-   SetPort(myWindow);
+   if TargetPort = nil then exit(DrawTimer);
+   SetPort(TargetPort);
    TimerWell(well);
    { NOTE: no DrawWell here.  The frame was painted by DrawStatusBar; the     }
    { once-a-second tick repaints only the digits (DrawReadout erases only     }
@@ -544,8 +604,8 @@ procedure DrawFace {pressed : boolean};
 var btn, face, ii : Rect;
     cx, cy : integer;
 begin
-   if myWindow = nil then exit(DrawFace);
-   SetPort(myWindow);
+   if TargetPort = nil then exit(DrawFace);
+   SetPort(TargetPort);
    FaceRect(btn);
 
    { The button plate: white, round-cornered, black frame.  The corner ovals  }
@@ -640,8 +700,8 @@ end;
 procedure DrawStatusBar;
 var well : Rect;
 begin
-   if myWindow = nil then exit(DrawStatusBar);
-   SetPort(myWindow);
+   if TargetPort = nil then exit(DrawStatusBar);
+   SetPort(TargetPort);
    DrawCounter;                      { draws its own well }
    TimerWell(well);
    DrawWell(well);                       { the timer's well frame ... }
@@ -652,17 +712,59 @@ end;
 {------------------------------------------------------------------------------}
 procedure DrawContents {window : WindowPtr};
 begin
-   if window = nil then exit(DrawContents);
-   SetPort(window);                      { direct QuickDraw at this window - 06-lib-qd-a }
-   ClipRect(window^.portRect);           { clip to the content area; during an  }
-                                         { update, drawing is FURTHER clipped   }
-                                         { to the damaged region by visRgn      }
-                                         { (BeginUpdate, 06-lib-wm-a)           }
-   EraseRect(window^.portRect);          { white the whole content ... }
+   { The window's full repaint IS the board image aimed at the window: one     }
+   { body serves both (the window is exactly content-sized, so its portRect    }
+   { and the image rect are the same rectangle).                               }
+   RenderImage(window)
+end;
+
+{------------------------------------------------------------------------------}
+procedure RenderImage {port : GrafPtr};
+var all : Rect;
+begin
+   if port = nil then exit(RenderImage);
+   imagePort := port;                    { every Draw* routine now lands here }
+   SetPort(port);                        { direct QuickDraw at the target - 06-lib-qd-a }
+   SetRect(all, 0, 0, contentW, contentH);
+   ClipRect(all);                        { clip to the image; during an update, }
+                                         { drawing is FURTHER clipped to the    }
+                                         { damaged region by visRgn             }
+                                         { (BeginUpdate, 06-lib-wm-a).  While a }
+                                         { picture is being recorded the clip   }
+                                         { is recorded too, so playback can     }
+                                         { never bleed outside the scaled image }
+   EraseRect(all);                       { white the whole content ... }
    DrawStatusBar;                        { ... then rebuild it: status bar ... }
-   DrawBoard                             { ... and board.  Nothing else exists: }
+   DrawBoard;                            { ... and board.  Nothing else exists: }
                                          { no scroll bars, no grow box -- the   }
                                          { window is exactly board-sized.       }
+   imagePort := nil                      { back to drawing the window }
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawScrapWindow {normal : boolean};
+var err : integer;
+begin
+   if normal then BeginUpdate(scrapFolder);   { consume the damage - 06-lib-wm-a }
+
+   { The scrap draws itself; we only pick which of its painters matches what   }
+   { is on it (CurrScrapSet is the switchboard, 06-lib-su-a section 4.1).      }
+   { Both painters set their own port to scrapFolder and erase; both require   }
+   { that we OWN the scrap, which is exactly the condition under which these   }
+   { update events reach us at all.                                            }
+   if ScrapUG in CurrScrapSet then
+      DrawUScrap(err)                    { the board picture Copy published }
+   else if ScrapFE in CurrScrapSet then
+      DrawScrap(err)                     { a field cut/copied in a dialog (06-lib-fe) }
+   else begin
+      SetPort(scrapFolder);              { we own an EMPTY scrap: blank it }
+      EraseRect(scrapFolder^.portRect)
+   end;
+   { err is not worth propagating: a scrap that cannot repaint its window is   }
+   { still a perfectly good scrap to paste from, and there is nothing here to  }
+   { do about it.                                                              }
+
+   if normal then EndUpdate(scrapFolder)
 end;
 
 end.

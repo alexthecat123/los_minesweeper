@@ -45,6 +45,11 @@ uses (*$U UnitStd.obj *)        UnitStd,    { base types: TC, TB, TP ...        
      (*$U QuickDraw.obj *)      QuickDraw,  { Rect, Point, Str255, drawing      - 06-lib-qd-a }
      (*$U Fontmgr.obj *)        FontMgr,    { font family numbers (tile12 ...)  - 06-lib-fm   }
      (*$U SysCall.obj *)        SysCall,    { processes, data segs, Get_Time    - 05-os-syscalls }
+     (*$U PMDecl.obj *)         PMDecl,     { printer/connector ids -- PrStdInfo's }
+                                            { interface needs it first (its own    }
+                                            { uses order: LibPr-PRSTDINFO.TEXT:24) }
+     (*$U PrStdInfo.obj *)      PrStdInfo,  { TPrRec, TPrPort, page sizes  - 06-lib-pr-a }
+     (*$U PrPublic.obj *)       PrPublic,   { the 16 client printing calls - 06-lib-pr-a }
      (*$U wm.events.obj *)      Events,     { EventRecord, GetEvent, Time ...   - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,    { windows, TakeControl, updates     - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,      { MenuInfo, InsertMenu, MenuSelect  - 06-lib-wm-b }
@@ -171,13 +176,19 @@ const
       miAside       = 2;         {   Set Aside            -> DoFilingCmd(cmdClose)   }
       { item 3 is a '-' separator }
       miPutAway     = 4;         {   Save & Put Away -> TellFiler(docClosd, docPutBack) }
+      { item 5 is a '-' separator }
+      miFormat      = 6;         {   Format for Printer ... -> PrPrfDlg (06-lib-pr-a; }
+                                 {   the Calculator's mIntend, APHP-HP.TEXT:2563)     }
+      miPrint       = 7;         {   Print ...              -> the print bracket      }
+      miMonitor     = 8;         {   Monitor the Printer ... -> PrBgdDlg (the Clock's  }
+                                 {   mPrintStatus, APCL-CLOCK.TEXT:1434)               }
 
-   mEdit = 2;                    { "Edit" -- live ONLY while a Field Editor    }
-      miUndo  = 1;               {   dialog is up; grayed the rest of the time }
-      { item 2 is a '-' separator }
-      miCut   = 3;               {   Cut/X   -> CutCopyField (06-lib-fe) }
-      miCopy  = 4;               {   Copy/C  -> CutCopyField             }
-      miPaste = 5;               {   Paste/V -> PasteField               }
+   mEdit = 2;                    { "Edit" -- Copy is live at the board (it     }
+      miUndo  = 1;               {   copies the board picture to the Scrap);   }
+      { item 2 is a '-' separator }{ the OTHER three act on a focused Field   }
+      miCut   = 3;               {   Editor field and so wake only while a     }
+      miCopy  = 4;               {   dialog is up (SetDlgMenuState).           }
+      miPaste = 5;               {   Cut/X Copy/C Paste/V                      }
 
    mGame = 3;                    { "Game" }
       miNewGame   = 1;           {   New Game/N }
@@ -194,7 +205,17 @@ const
       { item 4 is a '-' separator }
       miCustom       = 5;        {   Custom Level ... }
 
-   lastMenu = 4;                 { highest menu number we install in the bar }
+   mScrap = 5;                   { the SCRAP window's whole menu bar.  When our }
+      smiAsideAll = 1;           { Copy makes us the scrap's owner, activating  }
+      smiAside    = 2;           { the scrap window routes ITS folderActivate   }
+      { item 3 is a '-' separator }{ to us, and this is the bar we put up      }
+      smiMonitor  = 4;           { (PutUpScrapMenus below) -- the Calculator's  }
+                                 { menu 7 move, APHP-HP.TEXT:3624-3630.         }
+
+   lastBarMenu = 4;              { menus installed in OUR window's bar: mFile..mLevel }
+   lastMenu    = 5;              { highest menu InitMP reads from the phrase file     }
+                                 { (sizes myMenus[]; mScrap is installed alone, only  }
+                                 { when the scrap window is the one going active)     }
 
    {---------------------------------------------------------------------------}
    { Alerts and phrases.                                                        }
@@ -208,9 +229,11 @@ const
    { locked-in-cache "Swan Song" disk/memory alert).                            }
    {---------------------------------------------------------------------------}
 
-   alertVerNum = 2;       { version stamp expected in the phrase file; a       }
+   alertVerNum = 3;       { version stamp expected in the phrase file; a       }
                           { mismatch is only warning -3076, but bump both      }
                           { sides together when renumbering alerts (06-lib-am) }
+                          { (3 = the build that added printing, alert 60 and   }
+                          { the scrap menu -- see the note in the phrase file) }
 
    alrtFallback  = 1;     { note    - "message not found" (required by format) }
    alrtSwanSong  = 2;     { stop    - startup-disk trouble (required, cached)  }
@@ -220,6 +243,11 @@ const
    alrtResetBest = 40;    { caution - "Reset all best times?" default CANCEL   }
    alrtBadValue  = 50;    { stop    - custom value out of range, two-stage:    }
                           {           soft beep first, box on repeat           }
+   alrtNoPrint   = 60;    { stop    - could not stage the picture to print     }
+                          {           (scratch segment or picture failed).     }
+                          {           Everything past that point alerts        }
+                          {           through the Printer Library's own        }
+                          {           System.Pr. phrases (06-lib-pr-a).        }
 
    { "Get" phrases: number-only entries in the phrase file, one verbatim line  }
    { each, fetched with GetAlert (06-lib-am).  They let non-alert UI text      }
@@ -246,6 +274,54 @@ const
    fntCell   = tile12;    { cell digits 1..8: 12-point proportional, fits 14px }
    fntStatus = tile18;    { the two 3-digit readouts: bigger, reads at a glance }
    fntLabel  = tile12;    { dialog labels and field text }
+
+   {---------------------------------------------------------------------------}
+   { Printing.                                                                  }
+   {                                                                            }
+   { HOW THE BOARD GETS ONTO PAPER.  The board is drawn in screen pixels, and   }
+   { the print grafPort is bound to the PRINTER's device (GrafDevice inside     }
+   { PrDocStart, 06-lib-pr-a): a printer dot is not a screen pixel, and it is   }
+   { not even the same shape -- our whole geometry leans on the screen's 2:3    }
+   { pixel (see the board-geometry note above), so replaying the drawing 1:1    }
+   { in printer dots would come out tiny AND stretched.  QuickDraw's one        }
+   { scaling mechanism is the picture (DrawPicture maps picFrame onto any       }
+   { destination rect, 06-lib-qd-b section 17), so DoPrintBoard records the     }
+   { board once as a picture and plays it into a rectangle computed at the      }
+   { printer's resolution.  LisaWrite prints its pasted pictures through        }
+   { exactly this call ("draw, scaled to rT" -- APLW-UNITFIGIMAGE.TEXT:190),    }
+   { so a DrawPicture inside an open print page is a shipped, proven path.      }
+   {---------------------------------------------------------------------------}
+
+   printLDSN = 1;         { LDSN PrDocStart maps its private spool segment      }
+                          { through.  1 is the Calculator's printLDSN           }
+                          { (APHP-HP.TEXT:176); our own slots are 2 (document)  }
+                          { and 3 (below), OpenWM claims 15, the print manager  }
+                          { 12 and 9 (06-lib-pr-a A.2.1).                       }
+
+   picLDSN   = 3;         { LDSN for the SCRATCH data segment the print         }
+                          { picture is recorded into.  The picture of a full    }
+                          { board runs tens of kilobytes -- far past our 16 KB  }
+                          { private heap -- so it gets a throwaway segment      }
+                          { with its own heap zone, made in DoPrintBoard and    }
+                          { killed before it returns.  (The Scrap does the      }
+                          { same for the copy path: its segments grow on        }
+                          { demand, 06-lib-su-a section 2.)                     }
+
+   picCellBytes = 128;    { scratch-segment budget: bytes of picture per cell.  }
+                          { A cell records as a fill, two bevel polylines and   }
+                          { perhaps a glyph -- comfortably under 128 bytes of   }
+                          { picture opcodes.                                    }
+   picSlopBytes = 4096;   { ... plus the status bar, the frame, the picture     }
+                          { header, and the heap zone's own overhead.           }
+
+   { The screen's physical resolution, for sizing the printed image: 96 dots    }
+   { per inch across, 64 down (the 3:2 pixel again: 96 * 2/3 = 64).  These are  }
+   { LisaDraw's own screen-to-printer constants (xInchDots/yInchDots,           }
+   { APLD-HDR.TEXT:92-93), used exactly as its GetPrScl uses them: printed      }
+   { size = pixels / screenRes * printerRes, so the paper image comes out the   }
+   { size the screen image is, square cells included.                           }
+   scrHRes = 96;
+   scrVRes = 64;
 
    {---------------------------------------------------------------------------}
    { Private heap.  A static array handed to InitHeap (06-lib-qd-b, Storage):  }
@@ -354,6 +430,45 @@ var
                                  { resumed exactly as it was                   }
 
    {---------------------------------------------------------------------------}
+   { Printing state                                                             }
+   {---------------------------------------------------------------------------}
+
+   prRec : TPrRec;               { the print record: which printer, paper,     }
+                                 { orientation, copies (06-lib-pr-a, TPrRec).  }
+                                 { SESSION-lifetime, deliberately not a field  }
+                                 { of MSDoc: the segment's layout is frozen    }
+                                 { (see the dirty-list note below for why      }
+                                 { MSDoc must never grow), and the precedent   }
+                                 { app would gain nothing from persisting it   }
+                                 { anyway -- the Calculator keeps its record   }
+                                 { in its segment but re-defaults it on EVERY  }
+                                 { launch (PrPrfDefault, APHP-HP.TEXT:2283).   }
+                                 { Initialize stamps PrVersion := 0 so the     }
+                                 { record is INVALID until the first print     }
+                                 { command defaults it lazily (FPrPrfValid     }
+                                 { fails fast on a version mismatch); nothing  }
+                                 { here can block at launch waiting on the     }
+                                 { print system.                               }
+
+   picSegPath : pathname;        { "<stem>-TNNprint picture" -- the scratch    }
+                                 { segment DoPrintBoard records the print      }
+                                 { picture into.  Built once in Initialize     }
+                                 { from the same prefix as the data segment.   }
+
+   {---------------------------------------------------------------------------}
+   { Drawing redirection                                                        }
+   {---------------------------------------------------------------------------}
+
+   imagePort : GrafPtr;          { nil in normal play: MSDraw's routines draw  }
+                                 { into myWindow.  RenderImage (MSDraw) points }
+                                 { it at another port for the duration of one  }
+                                 { full repaint, which is how the SAME drawing }
+                                 { code paints the window, records the Copy    }
+                                 { picture, and records the print picture.     }
+                                 { (WindowPtr = GrafPtr -- a window IS a       }
+                                 { grafPort, 06-lib-wm-a -- so no casts.)      }
+
+   {---------------------------------------------------------------------------}
    { Timing                                                                     }
    {---------------------------------------------------------------------------}
 
@@ -458,6 +573,34 @@ function ClockSecs : longint;
 
 
 {------------------------------------------------------------------------------}
+{  PutUpScrapMenus -- install the menu bar for the SCRAP window.               }
+{                                                                              }
+{  Copying the board makes this process the scrap's owner (06-lib-su-a         }
+{  section 2), and the owner is who the Window Manager sends the scrap         }
+{  window's events to.  So when a folderActivate arrives with theEvent.who =   }
+{  scrapFolder, the bar we must put up is not the game's -- New Game aimed at  }
+{  the scrap window would be nonsense -- but the reduced File/Print that       }
+{  every scrap-owning app shows: Set Asides and Monitor the Printer            }
+{  (Calculator: PutUpMenus' else-arm installing its menu 7,                    }
+{  APHP-HP.TEXT:3624-3630).  Shared here rather than in the main program       }
+{  because the DIALOG loop can also see that activate (the modal panel locks   }
+{  only our window; the user is free to activate the scrap window mid-         }
+{  dialog), and MSDialog cannot call into the main program.                    }
+{------------------------------------------------------------------------------}
+
+procedure PutUpScrapMenus;
+
+{------------------------------------------------------------------------------}
+{  ScrapMenuCommand -- dispatch a pick from that menu.  Shared for the same    }
+{  reason: both event loops can receive it.  The Set Asides go to the Filer   }
+{  exactly as the main File menu's do (cmdClose closes the ACTIVE window,      }
+{  which is the scrap when this menu is up); Monitor defers to the print       }
+{  system's background status dialog (PrBgdDlg, 06-lib-pr-a).                  }
+{------------------------------------------------------------------------------}
+
+procedure ScrapMenuCommand (item : integer);
+
+{------------------------------------------------------------------------------}
 {  HandleFilerOp -- the tool-side Filer handshake, shared by the main event    }
 {  loop AND the modal dialog loops in MSDialog.                                 }
 {                                                                               }
@@ -504,6 +647,27 @@ begin
    { to fall back on.  A garbage read would show a garbage elapsed time for    }
    { one second and then correct itself.                                       }
    ClockSecs := ((ord4(t.day) * 24 + t.hour) * 60 + t.minute) * 60 + t.second
+end;
+
+procedure PutUpScrapMenus;
+begin
+   ClearMenuBar;                          { drop whatever bar was up - 06-lib-wm-b }
+   InsertMenu(myMenus[mScrap], 0);        { the one reduced menu, appended     }
+   DrawMenuBar
+end;
+
+procedure ScrapMenuCommand {item : integer};
+begin
+   case item of
+      smiAsideAll :
+         DoFilingCmd(cmdClosAll);         { filing belongs to the Filer - 06-lib-fc }
+      smiAside :
+         DoFilingCmd(cmdClose);           { the active window IS the scrap here }
+      smiMonitor :
+         PrBgdDlg;                        { the background print-status dialog;  }
+                                          { a no-op if the print system's father }
+                                          { process is not running (06-lib-pr-a) }
+   end
 end;
 
 procedure HandleFilerOp {var wantsOpen : boolean};

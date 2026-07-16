@@ -36,19 +36,36 @@ program Minesweeper;
 
 uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-lib-sm   }
      (*$U UnitHz.obj *)         UnitHz,      { heap zones                - 06-lib-sm   }
-     (*$U Storage.obj *)        Storage,     { InitHeap, theHeap         - 06-lib-qd-b }
-     (*$U QuickDraw.obj *)      QuickDraw,   { InitGraf, thePort, drawing - 06-lib-qd-a }
+     (*$U Storage.obj *)        Storage,     { InitHeap, theHeap, Get/SetHeap - 06-lib-qd-b }
+     (*$U QuickDraw.obj *)      QuickDraw,   { InitGraf, thePort, pictures - 06-lib-qd-a }
      (*$U Fontmgr.obj *)        FontMgr,     { font numbers              - 06-lib-fm   }
      (*$U dbenv.obj *)          dbenv,       { open-array types under FEdec }
      (*$U FEdec.obj *)          FEdec,       { field types (FETerminate lives on them) }
      (*$U fld.obj *)            fieldedit,   { FETerminate               - 06-lib-fe   }
      (*$U SysCall.obj *)        SysCall,     { processes, data segs, exceptions - 05-os-syscalls }
-     (*$U wm.events.obj *)      Events,      { GetEvent, EventAvail, ImActive, activeFolder - 06-lib-wm-a }
+     (*$U UnitFile.obj *)       UnitFile,    { the Scrap's file layer (its interface }
+                                             { needs it first) - 06-lib-su-b         }
+     (*$U PMDecl.obj *)         PMDecl,      { printer ids (PrStdInfo/Scrap need it) - 06-lib-pm }
+     (*$U PrStdInfo.obj *)      PrStdInfo,   { TPrRec, TPrPort, ePgRangeSuppress - 06-lib-pr-a }
+     (*$U PrPublic.obj *)       PrPublic,    { PrMgrInit, the dialogs, the print }
+                                             { bracket - 06-lib-pr-a             }
+     (*$U wm.events.obj *)      Events,      { GetEvent, EventAvail, ImActive, activeFolder, }
+                                             { scrapFolder - 06-lib-wm-a                     }
      (*$U wm.folders.obj *)     Folders,     { OpenWm, TakeControl, FolderSize ... - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,       { MenuSelect, MenuKey, CheckItem - 06-lib-wm-b }
      (*$U AlertMgr.obj *)       AlertMgr,    { InitMP, alerts            - 06-lib-am   }
      (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
      (*$U WMlCrs.obj *)         WMLCrs,      { InitWmlCrs                - 06-lib-sb   }
+     (*$U UnitFmt.obj *)        UnitFmt,     { the Scrap's format layer  - 06-lib-su-b }
+     (*$U UnitCs.obj *)         UnitCs,      { the Scrap's stream layer  - 06-lib-su-b }
+     (*$U UnitFf.obj *)         UnitFf,      { the Scrap's file classes  - 06-lib-su-b }
+     (*$U scrap.obj *)          Scrap,       { the clipboard: InheritScrap, PutGrScrap, }
+                                             { HzOfScrap ... - 06-lib-su-a              }
+     { The Scrap's client uses-list mirrors LisaWrite's proven minimal set    }
+     { (aplw-unitscrap.text:44-66).  All of these are INTRINSIC units: the    }
+     { $U paths are decorative and the code is shared at run time             }
+     { (02-workshop-build 5.2); the printing BODIES behind PrPublic come      }
+     { from PRLIB.OBJ, which the link script has always named.                }
      (*$U FilerComm.obj *)      FilerComm,   { TellFiler, DoFilingCmd    - 06-lib-fc   }
      (*$U MINESWEEPER/GLOBALS.OBJ *) MSGlobals,
      (*$U MINESWEEPER/GAME.OBJ *)    MSGame,
@@ -304,15 +321,16 @@ begin
    { Flag Mode carries a check while plain clicks plant flags. }
    CheckItem(myMenus[mGame], miFlagMode, myDoc^.flagMode);
 
-   { The Edit menu sleeps except while a Field Editor dialog is up: its       }
-   { items act on a focused field, and outside a dialog there is none.        }
-   { MSDialog enables them for the dialog's lifetime and re-grays them        }
-   { after; this re-assertion covers the initial state.  (An Edit menu that   }
-   { is ALWAYS gray would be worse than none -- ours earns its keep inside    }
-   { the dialogs, cf. the Calculator's ChkEditMenu, APHP-HP.TEXT:757.)        }
+   { Undo/Cut/Paste sleep except while a Field Editor dialog is up: they act  }
+   { on a focused field, and outside a dialog there is none.  MSDialog        }
+   { enables them for the dialog's lifetime and re-grays them after; this     }
+   { re-assertion covers the initial state.  COPY, though, is always alive:   }
+   { at the board it copies the whole board as a picture to the Scrap         }
+   { (DoCopyBoard), and inside a dialog MSDialog's own dispatch aims it at    }
+   { the focused field instead.                                               }
    DisableItem(myMenus[mEdit], miUndo);
    DisableItem(myMenus[mEdit], miCut);
-   DisableItem(myMenus[mEdit], miCopy);
+   EnableItem(myMenus[mEdit], miCopy);
    DisableItem(myMenus[mEdit], miPaste)
 end;
 
@@ -326,8 +344,9 @@ procedure PutUpMenus;
 var m : integer;
 begin
    ClearMenuBar;                         { drop whatever menus are up - 06-lib-wm-b }
-   for m := mFile to lastMenu do
-      InsertMenu(myMenus[m], 0);         { 0 = append at the right end }
+   for m := mFile to lastBarMenu do      { mFile..mLevel; mScrap is NOT ours --  }
+      InsertMenu(myMenus[m], 0);         { it goes up alone when the SCRAP       }
+                                         { window activates (PutUpScrapMenus)    }
    RefreshMenuState;                     { truth before paint }
    DrawMenuBar                           { one repaint for the batch }
 end;
@@ -784,6 +803,273 @@ begin
       InitNewDoc(theEvent.who)           { the lent window rides in the event }
 end;
 
+{==============================================================================}
+{  Copy and printing -- the board as an IMAGE.                                 }
+{                                                                              }
+{  Both features are the same picture wearing different destinations.  MSDraw }
+{  renders "everything but the window frame" -- counters, face, board -- into }
+{  whatever port imagePort names (RenderImage); recording that repaint with   }
+{  OpenPicture turns it into a QuickDraw picture (06-lib-qd-b section 17),    }
+{  and a picture is exactly what both consumers want: the Scrap's universal-  }
+{  graph slot IS a picture (PutGrScrap, 06-lib-su-a), and printing plays the  }
+{  picture into a page rectangle scaled to the printer (see the printing      }
+{  notes with the constants in MSGlobals).                                    }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+{  DoCopyBoard -- Edit/Copy at the board: publish a picture of the board on   }
+{  the Scrap, pasteable into any app that accepts pictures (LisaWrite,        }
+{  LisaDraw ...).                                                              }
+{                                                                              }
+{  This is the Calculator's own copy-tape-as-picture sequence, step for step  }
+{  (DrawGraphics, APHP-HP.TEXT:1570-1640): inherit the scrap (ownership +     }
+{  fresh current segment, old one kept for the system's undo), erase, open    }
+{  for writing, and -- the one non-obvious move -- point the STORAGE heap at  }
+{  the scrap's own zone before OpenPicture.  Pictures are recorded into heap  }
+{  handles from theHeap, and a handle on the clipboard must live INSIDE the   }
+{  scrap's data segment or it dies with our process; HzOfScrap is that zone   }
+{  (06-lib-su-a section 4.4).  Our 16 KB private heap could not have held a   }
+{  full board's picture anyway.                                               }
+{                                                                              }
+{  Recording draws nothing: OpenPicture hides the pen until ClosePicture      }
+{  (libqd-PICTURES.TEXT:187), so the board is not repainted on screen; the    }
+{  window port only lends its font and coordinate state.                      }
+{                                                                              }
+{  We publish ONLY the universal graph -- no PutScrap of a private format,    }
+{  because no application (including this one) knows how to paste a board     }
+{  back.  Copy works on any board in any state: a snapshot of a lost game is  }
+{  as legitimate as a won one.                                                 }
+{------------------------------------------------------------------------------}
+
+procedure DoCopyBoard;
+var scrErr   : integer;
+    frame    : Rect;
+    pic      : PicHandle;
+    saveHz   : THz;
+    savePort : GrafPtr;
+begin
+   if myWindow = nil then exit(DoCopyBoard);   { nothing to picture }
+
+   InheritScrap(true);                   { own the scrap; keep the old one so   }
+                                         { the SYSTEM can still undo the        }
+                                         { previous cut (06-lib-su-a InheritScrap) }
+   EraseScrapData(scrErr);               { fresh heap zone over the segment }
+   if scrErr <> 0 then exit(DoCopyBoard);
+   { An erase failure leaves an empty-but-consistent scrap; there is nothing  }
+   { better to do than stop quietly.  (The Calculator does not even test.)    }
+
+   StartPutScrap(scrErr);                { bind the segment read/write }
+   if scrErr <> 0 then exit(DoCopyBoard);
+
+   GetHeap(saveHz);                      { the Calculator's exact heap dance -- }
+   SetHeap(HzOfScrap);                   { picture handles go to the scrap zone }
+
+   GetPort(savePort);
+   SetPort(myWindow);                    { any valid port will do for recording }
+   SetRect(frame, 0, 0, contentW, contentH);
+   pic := OpenPicture(frame);            { start recording (pen hides) }
+   RenderImage(myWindow);                { the full repaint, captured as opcodes }
+   ClosePicture;                         { stop recording (pen shows) }
+
+   PutGrScrap(pic, scrErr);              { publish: ScrapUG joins CurrScrapSet }
+
+   SetHeap(saveHz);                      { our own allocations come from our    }
+                                         { heap again                           }
+   EndPutScrap(scrErr);                  { segment back to read-only, pageable }
+
+   DrawUScrap(scrErr);                   { if the scrap window is open on the   }
+                                         { desktop, show the new contents now   }
+                                         { (draws nothing when it is hidden --  }
+                                         { an empty visRgn clips it all away);  }
+                                         { later damage comes back to us as     }
+                                         { folderUpdates on scrapFolder, which  }
+                                         { DrawScrapWindow services             }
+   SetPort(savePort)
+end;
+
+{------------------------------------------------------------------------------}
+{  EnsurePrRec -- make sure prRec names a live printer before a dialog or a   }
+{  job uses it.  The canonical restore-time test (06-lib-pr-a section A.4):   }
+{  an invalid record -- our virgin PrVersion = 0 stamp from Initialize, or a  }
+{  printer that has since been disconnected -- is replaced with the current   }
+{  default printer's record.  Cheap when the record is already valid, and    }
+{  deliberately NOT called at startup: PrPrfDefault waits on the print        }
+{  system's background process, and launch is no place to wait on printers.   }
+{------------------------------------------------------------------------------}
+
+procedure EnsurePrRec;
+begin
+   if not FPrPrfValid(prRec) then
+      PrPrfDefault(prRec)
+end;
+
+{------------------------------------------------------------------------------}
+{  DoFormatForPrinter -- "Format for Printer ...": the dialog where the user  }
+{  picks which printer this document is intended for, its paper size and      }
+{  orientation.  The dialog itself runs in the printer's background process;  }
+{  PrPrfDlg blocks until it is answered and hands back the edited record      }
+{  (06-lib-pr-a).  fPgSzSuppress = true hides the special-paper-size fields,  }
+{  as every bundled app passes for fixed-layout content (LisaDraw's           }
+{  PrPrfCmd, APLD-PRT.TEXT:531; LisaWrite ditto).                             }
+{                                                                              }
+{  fNewStl ("the page geometry changed") is deliberately ignored: a document  }
+{  app reflows its layout on it, but the board's layout depends only on the   }
+{  level -- the printed image is simply centered on whatever page comes out   }
+{  of the dialog.  The Calculator ignores it in the same spot                 }
+{  (APHP-HP.TEXT:2563).                                                        }
+{------------------------------------------------------------------------------}
+
+procedure DoFormatForPrinter;
+var fNewStl : boolean;
+begin
+   EnsurePrRec;
+   PrPrfDlg(prRec, fNewStl, true)
+end;
+
+{------------------------------------------------------------------------------}
+{  DoPrintBoard -- "Print ...": the copies dialog, then the four-call print   }
+{  bracket around one page (06-lib-pr-a section A.4).                          }
+{                                                                              }
+{  THE PAGE.  The board is drawn in screen pixels; the print port is bound    }
+{  to the printer's device, whose dots are smaller and differently shaped     }
+{  (see the printing notes in MSGlobals).  So: record the board as a picture  }
+{  (same recording Copy makes), then DrawPicture it into a destination rect   }
+{  sized at printerRes / screenRes -- true size on paper, square cells kept   }
+{  square, LisaDraw's own conversion (GetPrScl, APLD-PRT.TEXT:114-130).       }
+{  Playing a picture inside an open print page is LisaWrite's shipped path    }
+{  for printing pasted figures (APLW-UNITFIGIMAGE.TEXT:190).                  }
+{                                                                              }
+{  THE PICTURE'S MEMORY.  Tens of kilobytes for a big board -- far beyond     }
+{  the private heap -- so it is recorded into a THROWAWAY data segment        }
+{  carrying its own heap zone: made here, killed before returning, never      }
+{  bigger than one print.  (The scrap borrows this same trick for Copy; here  }
+{  we cannot borrow the scrap itself without clobbering the clipboard every   }
+{  time the user prints.)  InitHeap builds the zone and makes it current;     }
+{  the existing OutOfHeapSpace callback answers "cannot grow", which is fine  }
+{  because the segment is sized generously up front (picCellBytes).           }
+{                                                                              }
+{  THE BRACKET.  FPrInsDlg asks copies (ePgRangeSuppress: a page range makes  }
+{  no sense on a one-page document); false = the user cancelled.  PrDocStart  }
+{  false = the library could not start the job and has already told the user  }
+{  -- skip the page.  PrDocEnd runs UNCONDITIONALLY after: that is how both   }
+{  the Calculator (APHP-HP.TEXT:4362) and LisaDraw ship it, and it is what    }
+{  releases the spool machinery on every path.                                }
+{------------------------------------------------------------------------------}
+
+procedure DoPrintBoard;
+var fNewStl  : boolean;
+    prPort   : TPrPort;
+    inRange  : boolean;
+    junkB    : boolean;
+    frame    : Rect;
+    dst      : Rect;
+    pic      : PicHandle;
+    saveHz   : THz;
+    savePort : GrafPtr;
+    err      : integer;
+    junkErr  : integer;
+    schedErr : integer;
+    segBytes : longint;
+    picRef   : integer;
+    picBase  : longint;
+    w, h     : longint;
+    pw, ph   : longint;
+
+begin
+   if myWindow = nil then exit(DoPrintBoard);
+
+   EnsurePrRec;
+   if not FPrInsDlg(prRec, fNewStl, ePgRangeSuppress) then
+      exit(DoPrintBoard);                { the user said Cancel }
+
+   { --- Stage the picture in a throwaway segment. ---------------------------- }
+   segBytes := ord4(myDoc^.cols) * myDoc^.rows * picCellBytes + picSlopBytes;
+   Sched_Class(schedErr, false);         { segment calls can block on disk;     }
+                                         { drop to preemptive around them       }
+                                         { (05-os-syscalls section 3)           }
+   Kill_Object(junkErr, picSegPath);     { a stale segment from a crash mid-    }
+                                         { print would make Make_DataSeg fail;  }
+                                         { best-effort, error ignored           }
+   Make_DataSeg(err, picSegPath, segBytes, segBytes,
+                picRef, picBase, picLDSN, ds_shared);
+   Sched_Class(schedErr, true);
+   if err > 0 then begin
+      StopAlert(allAlerts, alrtNoPrint); { could not stage: usually a full disk }
+      exit(DoPrintBoard)
+   end;
+
+   GetPort(savePort);
+   GetHeap(saveHz);
+   InitHeap(pointer(picBase), pointer(picBase + segBytes), @OutOfHeapSpace);
+   { InitHeap both formats the zone and makes it CURRENT (06-lib-qd-b,         }
+   { Storage), so the recording below allocates in the scratch segment.        }
+
+   SetPort(myWindow);
+   SetRect(frame, 0, 0, contentW, contentH);
+   pic := OpenPicture(frame);
+   RenderImage(myWindow);
+   ClosePicture;
+
+   SetHeap(saveHz);                      { our allocations are ours again }
+
+   if pic = nil then
+      { The zone filled up mid-recording despite the generous budget.  The     }
+      { job has not started; report and fall through to the teardown.          }
+      StopAlert(allAlerts, alrtNoPrint)
+
+   else begin
+      { --- The print bracket. ------------------------------------------------ }
+      if PrDocStart(prRec, prPort, printLDSN, true) then begin
+         { true: let the library put up its "spooling ..." wait alert }
+
+         inRange := PrPageStart(prRec, prPort);
+         if inRange then begin
+            SetPort(@prPort.gport);      { the page's port (PrPageStart set it  }
+                                         { too; explicit is free)               }
+
+            { Destination: the picture at true physical size --                }
+            {    dots = pixels * printerRes / screenRes                        }
+            { -- centered on the printable rectangle, and shrunk               }
+            { proportionally in the (unlikely) case it overhangs: the Expert   }
+            { board is ~6.7 x 4.5 inches, well inside any supported paper.     }
+            with prRec.PrInfo do begin
+               w  := (ord4(contentW) * HRes) div scrHRes;
+               h  := (ord4(contentH) * VRes) div scrVRes;
+               pw := rPrintable.right - rPrintable.left;
+               ph := rPrintable.bottom - rPrintable.top;
+               if w > pw then begin
+                  h := (h * pw) div w;
+                  w := pw
+               end;
+               if h > ph then begin
+                  w := (w * ph) div h;
+                  h := ph
+               end;
+               dst.left   := rPrintable.left + (pw - w) div 2;
+               dst.top    := rPrintable.top  + (ph - h) div 2;
+               dst.right  := dst.left + w;
+               dst.bottom := dst.top + h
+            end;
+
+            DrawPicture(pic, dst)        { scaled playback into the spool file }
+         end;
+         junkB := PrPageEnd(prRec, prPort)
+         { One page: the loop the template puts here collapses to a single     }
+         { start/end pair, and the "last page?" result has nothing to decide.  }
+      end;
+      PrDocEnd(prRec, prPort)
+      { Unconditional (see the header): releases the spool segment and hands   }
+      { the finished job to the background printer.                            }
+   end;
+
+   { --- Tear down the staging segment; the picture dies with it. ------------- }
+   SetPort(savePort);
+   Sched_Class(schedErr, false);
+   Close_DataSeg(err, picRef);
+   Kill_Object(junkErr, picSegPath);     { scratch: nothing worth keeping }
+   Sched_Class(schedErr, true)
+end;
+
 {------------------------------------------------------------------------------}
 {  MenuCommand -- dispatch a chosen menu item (from MenuSelect or MenuKey).   }
 {  The big nested case over (menu, item) -- 03-app-template section 8.2.      }
@@ -817,14 +1103,32 @@ begin
                   TellFiler(err, docClosd, docPutBack, myWindow);
                   myWindow := nil
                end;
+            miFormat :
+               DoFormatForPrinter;       { which printer / paper / orientation }
+            miPrint :
+               DoPrintBoard;             { copies dialog, then the print bracket }
+            miMonitor :
+               PrBgdDlg;                 { the print system's background        }
+                                         { status dialog; a no-op when its      }
+                                         { father process is not running        }
+                                         { (06-lib-pr-a; the Clock's            }
+                                         { mPrintStatus, APCL-CLOCK.TEXT:1434)  }
          end;
 
       mEdit :
-         { Edit items are disabled outside the dialogs, and MenuSelect /      }
-         { MenuKey never return disabled items (06-lib-wm-b), so this arm is  }
-         { unreachable here; the dialogs dispatch their own Edit commands.    }
-         { The empty case documents the intent.                               }
-         ;
+         { Only Copy can arrive here: the other three Edit items are          }
+         { disabled outside the dialogs, and MenuSelect / MenuKey never       }
+         { return disabled items (06-lib-wm-b).  The dialogs dispatch their   }
+         { own Edit commands, Copy included, at the focused field; at the     }
+         { board Copy means the whole board, as a picture.                    }
+         if item = miCopy then
+            DoCopyBoard;
+
+      mScrap :
+         { The scrap window's menu -- up only while the scrap window we own   }
+         { is active.  Shared dispatch, because the dialogs' nested loop can  }
+         { field the same picks (MSGlobals, ScrapMenuCommand).                }
+         ScrapMenuCommand(item);
 
       mGame :
          case item of
@@ -927,13 +1231,22 @@ begin
 
       folderActivate :
          begin
-            { We are becoming the active window.  TakeControl completes the   }
-            { WM's two-process handshake -- it will not finish the switch     }
-            { until we answer -- then the menu bar is ours to rebuild         }
-            { (01-orientation 6.3).                                           }
+            { One of OUR windows is becoming the active window -- and after a }
+            { Copy that can be the SCRAP window, not just the game: the scrap }
+            { window's events route to the scrap's owner (06-lib-su-a         }
+            { section 2).  TakeControl completes the WM's two-process         }
+            { handshake -- it will not finish the switch until we answer --   }
+            { then the menu bar is ours to rebuild (01-orientation 6.3),      }
+            { and WHICH bar depends on which window this is: the game gets    }
+            { the game's menus, the scrap gets the reduced scrap menu (the    }
+            { Calculator's PutUpMenus makes the same branch,                  }
+            { APHP-HP.TEXT:3624-3630).                                        }
             TakeControl(theEvent, false, false);   { false, false: fresh menus }
                                                    { and dialog band           }
-            PutUpMenus
+            if theEvent.who = scrapFolder then
+               PutUpScrapMenus
+            else
+               PutUpMenus
          end;
 
       folderDeactivate :
@@ -944,9 +1257,14 @@ begin
          GiveControl(theEvent);
 
       folderUpdate :
-         { Some of our window was uncovered; redraw just the damage through   }
-         { the update bracket.                                                }
-         doUpdateEvent(true, theEvent.who);
+         { Some window of ours was uncovered; redraw just the damage through  }
+         { the update bracket.  "Ours" includes the scrap window while we own }
+         { the scrap -- and that one shows the SCRAP's contents, never the    }
+         { live board (DrawScrapWindow, MSDraw).                              }
+         if theEvent.who = scrapFolder then
+            DrawScrapWindow(true)
+         else
+            doUpdateEvent(true, theEvent.who);
 
       folderMoved :
          { The user dragged the window.  We cache no global coordinates       }
@@ -1018,6 +1336,18 @@ begin
    { (2) Known state for the app-owned flags. }
    toldToDie := false;
    myWindow  := nil;
+   imagePort := nil;        { MSDraw draws into myWindow until RenderImage      }
+                            { redirects a repaint (unit globals are NOT         }
+                            { auto-initialised; a garbage port here would be    }
+                            { drawn into)                                       }
+   prRec.PrVersion := 0;    { deliberately INVALID (cPrPrfVersion is never 0):  }
+                            { the record is defaulted lazily, by the first      }
+                            { print command's EnsurePrRec -- PrPrfDefault waits }
+                            { on the print system's background process, and     }
+                            { launch is no place to wait on printers.  The      }
+                            { other fields stay garbage; FPrPrfValid fails on   }
+                            { the version stamp before looking at them          }
+                            { (06-lib-pr-a FPrPrfValid).                        }
    startRef  := 0;
    lastClkTime := 0;
    lastClkCol  := 0;
@@ -1077,6 +1407,18 @@ begin
       halt
    end;
 
+   { (6a) The Print Manager, for the three File/Print printing commands.      }
+   { AFTER InitMP, which is what runs InitAlerts for us -- PrMgrInit's one    }
+   { stated precondition (06-lib-pr-a: it swaps the printing alerts in from   }
+   { the System.Pr. phrase file, so the Alert Manager must be up).  Both      }
+   { precedent tools call it at exactly this point: the Clock right after     }
+   { its InitMP (APCL-CLOCK.TEXT:1182), the Calculator likewise               }
+   { (APHP-HP.TEXT:1978).  Neither calls PrGlobalInit -- that reset of the    }
+   { SHARED printing state belongs to the system's boot, not to every app     }
+   { (only Preferences touches it).  PrMgrInit reports no errors; a missing   }
+   { System.Pr. file just leaves the printing alerts silent.                  }
+   PrMgrInit;
+
    { (7) The Field Editor and the four dialog fields.  After InitMP because   }
    { the word-triples string is a phrase; after InitHeap because fields live  }
    { in theHeap.  (MSDialog.InitDialogs; 06-lib-fe FEInit.)                   }
@@ -1109,6 +1451,12 @@ begin
    dsPath := concat(myPrefix, 'data segment');
    { -> "<stem>-TNNdata segment", matching the Calculator's naming            }
    {    ('-T12data segment') but with the number coming from OUR path.        }
+
+   picSegPath := concat(myPrefix, 'print picture');
+   { The print-time scratch segment hangs off the same prefix, for the same   }
+   { reason: renumbering the tool renames every file it owns, with zero       }
+   { source changes.  Only built here; DoPrintBoard makes and kills the       }
+   { segment itself, per print.                                               }
 
    useDefaults := false;
    Sched_Class(schedErr, false);

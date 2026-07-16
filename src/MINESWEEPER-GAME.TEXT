@@ -29,6 +29,9 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
      (*$U QuickDraw.obj *)      QuickDraw,   { Random / randSeed         - 06-lib-qd-b }
      (*$U Fontmgr.obj *)        FontMgr,     { font consts (via MSGlobals) - 06-lib-fm }
      (*$U SysCall.obj *)        SysCall,     { types used by MSGlobals   - 05-os-syscalls }
+     (*$U PMDecl.obj *)         PMDecl,      { (via MSGlobals: PrStdInfo needs it) - 06-lib-pm }
+     (*$U PrStdInfo.obj *)      PrStdInfo,   { TPrRec (via MSGlobals)    - 06-lib-pr-a }
+     (*$U PrPublic.obj *)       PrPublic,    { (via MSGlobals)           - 06-lib-pr-a }
      (*$U wm.events.obj *)      Events,      { EventRecord (via MSGlobals) - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,     { WindowPtr etc.            - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,       { MenuInfo (via MSGlobals)  - 06-lib-wm-b }
