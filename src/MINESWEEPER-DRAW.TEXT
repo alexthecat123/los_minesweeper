@@ -1,0 +1,590 @@
+{==============================================================================}
+{                                                                              }
+{  MINESWEEPER-DRAW.TEXT  --  unit MSDraw                                      }
+{                                                                              }
+{  All QuickDraw rendering: the board, the cells, the digits, mines and        }
+{  flags, the status bar with its two three-digit readouts, and the face /     }
+{  reset button.  Also the geometry helpers (cell <-> pixel mapping) that      }
+{  the click handler needs -- geometry lives with the drawing because the      }
+{  two must agree to the pixel.                                                }
+{                                                                              }
+{  THE ONE VISUAL RULE THAT MATTERS: the Lisa's pixels are 2/3 as wide as      }
+{  they are tall (06-lib-hw, MouseScaling), so anything meant to LOOK square   }
+{  or circular is drawn 3:2 in pixels.  Cells are 21 x 14, the mine's body     }
+{  is a 12 x 8 oval, the reset button is 33 x 22, the face is an 18 x 12       }
+{  oval.  Where you see an unexplained 3:2 below, that is why.                 }
+{                                                                              }
+{  Choices made here (called out per routine below):                           }
+{    - covered cell  = ltGray fill, white top/left highlight, black            }
+{      bottom/right shadow: the raised bevel that makes Minesweeper read       }
+{      as Minesweeper on a 1-bit screen;                                       }
+{    - revealed cell = flat white, single gray grid line on right+bottom,      }
+{      visibly sunken next to its raised neighbours;                           }
+{    - digits 1..3 plain, 4..8 BOLD -- with no colour to grade danger, we      }
+{      lean on type weight (TextFace);                                         }
+{    - the fatal mine sits on an INVERTED cell (white mine on black): the      }
+{      strongest emphasis a 1-bit screen has;                                  }
+{    - a wrong flag (flag on a non-mine, shown after a loss) is a mine with    }
+{      an X struck through it, as in the original;                             }
+{    - the whole board wears a 1-pixel black frame so it sits ON the window    }
+{      instead of floating in it.                                              }
+{                                                                              }
+{  Every public routine here sets the port itself (SetPort(myWindow)) and      }
+{  no-ops when myWindow = nil (window given back to the Filer): callers        }
+{  never have to think about port state.  QuickDraw clips everything to        }
+{  visRgn * clipRgn, so drawing during an update is automatically limited      }
+{  to the damaged area (06-lib-qd-a, 06-lib-wm-a BeginUpdate).                 }
+{                                                                              }
+{==============================================================================}
+
+unit MSDraw;
+
+INTERFACE
+
+uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-lib-sm   }
+     (*$U UnitHz.obj *)         UnitHz,      { heap types                - 06-lib-sm   }
+     (*$U Storage.obj *)        Storage,     { theHeap                   - 06-lib-qd-b }
+     (*$U QuickDraw.obj *)      QuickDraw,   { every drawing call here   - 06-lib-qd-a }
+     (*$U Fontmgr.obj *)        FontMgr,     { font family numbers       - 06-lib-fm   }
+     (*$U libos/SysCall.obj *)  SysCall,     { types used by MSGlobals   - 05-os-syscalls }
+     (*$U wm.events.obj *)      Events,      { WindowPtr                 - 06-lib-wm-a }
+     (*$U wm.folders.obj *)     Folders,     { portRect access           - 06-lib-wm-a }
+     (*$U wm.menus.obj *)       Menus,       { MenuInfo (via MSGlobals)  - 06-lib-wm-b }
+     (*$U AlertMgr.obj *)       AlertMgr,    { TAlertFile (via MSGlobals) - 06-lib-am  }
+     (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
+     (*$U WMlCrs.obj *)         WMLCrs,      { cursor decls              - 06-lib-sb   }
+     (*$U FilerComm.obj *)      FilerComm,   { FilerExt (via MSGlobals)  - 06-lib-fc   }
+     (*$U MINESWEEPER-GLOBALS.OBJ *) MSGlobals;
+
+
+{ ComputeLayout -- recompute contentW / contentH (MSGlobals) from the current }
+{ board dimensions in myDoc^.  Call after every level change, BEFORE          }
+{ FolderSize.  The arithmetic (and the proof it fits the 720 x 364 screen)    }
+{ is with the constants in MSGlobals.                                         }
+procedure ComputeLayout;
+
+{ CellRect -- the pixel rectangle of cell (c, r), 1-based, in window-local    }
+{ coordinates.  Every routine that touches a cell goes through this, so the   }
+{ hit-testing and the drawing can never disagree.                             }
+procedure CellRect (c, r : integer; var box : Rect);
+
+{ PointToCell -- map a window-local point to a cell.  Returns false if the    }
+{ point is outside the board.  (theEvent.where is already window-local:       }
+{ GetEvent converts it, 06-lib-wm-a.)                                         }
+function PointToCell (pt : Point; var c, r : integer) : boolean;
+
+{ FaceRect -- the reset ("face") button's rectangle, centered in the status   }
+{ bar.  Public because the click handler hit-tests it and inverts it for      }
+{ press feedback.                                                             }
+procedure FaceRect (var box : Rect);
+
+{ DrawCell -- repaint one cell from the document state.  The cheap targeted   }
+{ redraw used for flag toggles; every path through it paints EVERY pixel of   }
+{ the cell, so no separate erase is needed and unchanged cells repaint        }
+{ identically (i.e. flicker-free).                                            }
+procedure DrawCell (c, r : integer);
+
+{ DrawBoard -- repaint every cell plus the 1-pixel frame.  Used after         }
+{ anything that can change many cells at once (reveal flood, chord, new       }
+{ game, win, loss).  540 cells of rectangle fills is well within a 68000's    }
+{ patience for a turn-based game.                                             }
+procedure DrawBoard;
+
+{ DrawCounter -- the left-hand 3-digit readout: mines minus flags.            }
+procedure DrawCounter;
+
+{ DrawTimer -- the right-hand 3-digit readout: elapsed seconds.  Called once  }
+{ a second from the idle loop, so it repaints ONLY the digits in the well --  }
+{ it must stay cheap (03-app-template / the Clock's idle pattern).            }
+procedure DrawTimer;
+
+{ DrawFace -- the reset button and its face: smiling normally, dead (X eyes)  }
+{ after a loss, cool (sunglasses) after a win, worried while the mouse is     }
+{ held down on a cell (pass pressed = true for that one).                     }
+procedure DrawFace (pressed : boolean);
+
+{ DrawStatusBar -- counter + face + timer.                                    }
+procedure DrawStatusBar;
+
+{ DrawContents -- the full repaint: erase, status bar, board.  This is the    }
+{ routine the folderUpdate handler calls between BeginUpdate / EndUpdate      }
+{ (03-app-template section 9.1), and InitNewDoc calls for the first paint.    }
+procedure DrawContents (window : WindowPtr);
+
+
+IMPLEMENTATION
+
+{------------------------------------------------------------------------------}
+{  Layout numbers private to the drawing.  The status bar is built from       }
+{  these; they are locals of the unit rather than MSGlobals constants         }
+{  because nothing outside the drawing needs them.                            }
+{------------------------------------------------------------------------------}
+
+const
+   wellH    = 26;    { height of a counter well: tile18 is an 18-point font    }
+                     { (ascent+descent ~22 px), plus a little breathing room   }
+   wellPad  = 5;     { white pixels between the well frame and the digits      }
+   faceW    = 33;    { reset button 33 x 22 -- 3:2, so it reads as a square    }
+   faceH    = 22;    {   (33 * 2/3 = 22; see the aspect-ratio rule above)      }
+
+{------------------------------------------------------------------------------}
+procedure ComputeLayout;
+begin
+   { contentW = margin + board + margin; the board is cols cells wide.         }
+   contentW := 2 * winMargin + myDoc^.cols * cellW;
+   { contentH = margin + status bar + gap + board + margin.  boardTop is the   }
+   { precomputed margin+statusH+statusGap = 56 (MSGlobals).                    }
+   contentH := boardTop + myDoc^.rows * cellH + winMargin
+end;
+
+{------------------------------------------------------------------------------}
+procedure CellRect {c, r : integer; var box : Rect};
+begin
+   { SetRect takes left,top,right,bottom -- NOT the record's field order      }
+   { (top,left,bottom,right); a classic QuickDraw stumble (06-lib-qd-a).      }
+   SetRect(box, boardLeft + (c - 1) * cellW,
+                boardTop  + (r - 1) * cellH,
+                boardLeft + c * cellW,
+                boardTop  + r * cellH)
+   { Rect edges are grid lines BETWEEN pixels, so this box encloses exactly   }
+   { cellW x cellH pixels and adjacent cells share no pixel (06-lib-qd-a      }
+   { section 2.7).                                                            }
+end;
+
+{------------------------------------------------------------------------------}
+function PointToCell {(pt : Point; var c, r : integer) : boolean};
+begin
+   PointToCell := false;
+   { Reject points left/above the board before dividing: integer div rounds   }
+   { toward zero, so (pt.h - boardLeft) div cellW would map the 20 pixels     }
+   { LEFT of the board onto column 1 as well -- test first, divide after.     }
+   if (pt.h >= boardLeft) and (pt.v >= boardTop) then begin
+      c := (pt.h - boardLeft) div cellW + 1;
+      r := (pt.v - boardTop)  div cellH + 1;
+      if (c >= 1) and (c <= myDoc^.cols) and (r >= 1) and (r <= myDoc^.rows) then
+         PointToCell := true
+   end
+end;
+
+{------------------------------------------------------------------------------}
+procedure FaceRect {var box : Rect};
+var cx, cy : integer;
+begin
+   { Centered horizontally in the CONTENT (so it stays centered on every      }
+   { board size), centered vertically in the status bar.                      }
+   cx := contentW div 2;
+   cy := winMargin + statusH div 2;
+   SetRect(box, cx - faceW div 2, cy - faceH div 2,
+                cx - faceW div 2 + faceW, cy - faceH div 2 + faceH)
+end;
+
+{------------------------------------------------------------------------------}
+{  DrawReadout -- shared by the two readouts: paint integer n as a fixed      }
+{  three-character group, right-aligned inside 'well', clamped to -99..999.   }
+{  Negative counts happen (more flags than mines) and are shown as the        }
+{  original showed them ('-07').  We build the text as a 3-char string and    }
+{  right-align with StringWidth -- never by eyeballed offsets, because the    }
+{  status font is proportional (06-lib-qd-a StringWidth).                     }
+{------------------------------------------------------------------------------}
+
+procedure DrawReadout (n : integer; var well : Rect);
+var s     : Str255;
+    m     : integer;
+    fi    : FontInfo;
+    x, y  : integer;
+    inner : Rect;
+begin
+   if n > 999 then n := 999;             { clamp the DISPLAY only }
+   if n < -99 then n := -99;
+
+   s := '000';                           { 3 characters; we overwrite in place }
+   if n < 0 then begin
+      m := -n;
+      s[1] := '-';                       { minus eats the hundreds digit }
+      s[2] := chr(ord('0') + m div 10);
+      s[3] := chr(ord('0') + m mod 10)
+   end
+   else begin
+      s[1] := chr(ord('0') + n div 100);
+      s[2] := chr(ord('0') + (n div 10) mod 10);
+      s[3] := chr(ord('0') + n mod 10)
+   end;
+
+   TextFont(fntStatus);                  { 18-point tile - 06-lib-fm 3.4 }
+   TextFace([]);                         { plain; boldness is for the cells }
+   GetFontInfo(fi);                      { real metrics for real centering - 06-lib-qd-a }
+
+   { Erase just the INTERIOR (the digits' background), then draw the new      }
+   { digits transparently.  Erasing only inside the frame is what keeps the   }
+   { once-a-second timer tick flickerless: the well frame never repaints.     }
+   { (Why not TextMode(srcCopy) and skip the erase?  Because the font is      }
+   { proportional: when the new string is narrower than the old one, srcCopy  }
+   { covers only the new glyph cells and stale pixels survive at the left     }
+   { edge.  Erase-then-draw is unconditionally right.)                        }
+   inner := well;
+   InsetRect(inner, 2, 2);               { stay off the frame and its inner shadow }
+   EraseRect(inner);
+
+   x := well.right - wellPad - StringWidth(s);            { right-aligned }
+   y := well.top + (well.bottom - well.top + fi.ascent - fi.descent) div 2;
+   { ^ vertical centering: the baseline sits so that ascent above and         }
+   { descent below leave equal margins.                                       }
+
+   MoveTo(x, y);
+   TextMode(srcOr);                      { transparent glyphs over the fresh white }
+   DrawString(s)
+end;
+
+{------------------------------------------------------------------------------}
+{  DrawWell -- the sunken frame both readouts sit in.  On a 1-bit screen      }
+{  "sunken" is the mirror of the raised bevel: a doubled dark edge on top     }
+{  and left, single edge bottom and right.                                    }
+{------------------------------------------------------------------------------}
+
+procedure DrawWell (var well : Rect);
+var inner : Rect;
+begin
+   EraseRect(well);                      { white interior - 06-lib-qd-a }
+   PenNormal;                            { known pen: size 1, black, patCopy }
+   FrameRect(well);                      { the outer frame }
+   inner := well;
+   InsetRect(inner, 1, 1);               { one pixel in ... }
+   MoveTo(inner.left, inner.bottom - 1); { ... darken the inside top and left: }
+   LineTo(inner.left, inner.top);        { the light "falls" from the upper    }
+   LineTo(inner.right - 1, inner.top)    { left on the Lisa desktop, so a      }
+                                         { thick upper-left edge reads as a    }
+                                         { recess                              }
+end;
+
+{------------------------------------------------------------------------------}
+{  The well rectangles.  Computed, not stored: they depend on contentW,       }
+{  which changes with the level.                                              }
+{------------------------------------------------------------------------------}
+
+procedure CounterWell (var well : Rect);
+var top : integer;
+begin
+   top := winMargin + (statusH - wellH) div 2;
+   { Width: three digits of the status font plus padding either side.  The    }
+   { digit string measured is the widest one we can show ('-99' is narrower   }
+   { than '000'? not necessarily -- so measure the classic widest '000' and   }
+   { give one extra pad of slack).                                            }
+   TextFont(fntStatus);
+   TextFace([]);
+   SetRect(well, winMargin + 4, top,
+                 winMargin + 4 + StringWidth('000') + 2 * wellPad + 2, top + wellH)
+   { '000' here is geometry, not language: it never reaches the user's eyes   }
+   { as text, so it does not belong in the phrase file.                       }
+end;
+
+procedure TimerWell (var well : Rect);
+var top, w : integer;
+begin
+   top := winMargin + (statusH - wellH) div 2;
+   TextFont(fntStatus);
+   TextFace([]);
+   w := StringWidth('000') + 2 * wellPad + 2;
+   SetRect(well, contentW - winMargin - 4 - w, top,
+                 contentW - winMargin - 4, top + wellH)
+end;
+
+{------------------------------------------------------------------------------}
+{  DrawMineGlyph -- the mine, drawn inside 'box' (a cell).  A filled oval     }
+{  with radiating spokes.  The body is 12 x 8 -- 3:2, so it is a CIRCLE on    }
+{  glass, not an egg (the aspect-ratio rule at the top of the file).          }
+{------------------------------------------------------------------------------}
+
+procedure DrawMineGlyph (var box : Rect);
+var cx, cy : integer;
+    body   : Rect;
+    glint  : Rect;
+begin
+   cx := (box.left + box.right) div 2;
+   cy := (box.top + box.bottom) div 2;
+
+   PenNormal;
+   { The spokes first, so the body paints over their inner ends cleanly.      }
+   MoveTo(cx - 9, cy);      LineTo(cx + 9, cy);       { horizontal: +-9        }
+   MoveTo(cx, cy - 6);      LineTo(cx, cy + 6);       { vertical:   +-6 (3:2!) }
+   MoveTo(cx - 7, cy - 5);  LineTo(cx + 7, cy + 5);   { diagonals, foreshortened }
+   MoveTo(cx - 7, cy + 5);  LineTo(cx + 7, cy - 5);   { the same way            }
+
+   SetRect(body, cx - 6, cy - 4, cx + 6, cy + 4);     { 12 x 8 = round on glass }
+   PaintOval(body);                                   { filled body - 06-lib-qd-a }
+
+   { The traditional glint: a two-pixel white spark up-left of center.        }
+   SetRect(glint, cx - 3, cy - 2, cx - 1, cy - 1);
+   FillRect(glint, white)
+end;
+
+{------------------------------------------------------------------------------}
+{  DrawFlagGlyph -- the flag: a triangular pennant on a staff with a base.    }
+{  The pennant is drawn as three raster lines of shrinking length -- cheaper  }
+{  and crisper at this size than a QuickDraw polygon would be.                }
+{------------------------------------------------------------------------------}
+
+procedure DrawFlagGlyph (var box : Rect);
+var staffX : integer;
+    i      : integer;
+begin
+   PenNormal;
+   { The staff stands just right of center so the pennant (which flies left)  }
+   { balances the glyph in the cell.                                          }
+   staffX := box.left + cellW div 2 + 3;
+
+   MoveTo(staffX, box.top + 3);                 { staff, top ... }
+   LineTo(staffX, box.bottom - 4);              { ... to base    }
+   MoveTo(staffX - 4, box.bottom - 4);          { base plinth    }
+   LineTo(staffX + 3, box.bottom - 4);
+
+   { Pennant: three rows, 8/6/4 pixels wide, right edges on the staff.  The   }
+   { widest row is on top -- the pennant tapers downward.  Wider than tall    }
+   { (8 x 3), which the 2/3-wide pixels squeeze back toward a neat triangle.  }
+   for i := 0 to 2 do begin
+      MoveTo(staffX - 8 + 2 * i, box.top + 3 + i);
+      LineTo(staffX - 1, box.top + 3 + i)
+   end
+end;
+
+{------------------------------------------------------------------------------}
+{  DrawDigitGlyph -- a cell's 1..8 count, centered in the cell.  With no      }
+{  colours to grade danger on 1-bit hardware, weight does the work: 1..3      }
+{  plain, 4..8 bold (TextFace [bold] is synthesised by QuickDraw from the     }
+{  base font -- 06-lib-qd-a TextFace).  Centering is measured with            }
+{  CharWidth / GetFontInfo, never eyeballed, because the cell is only         }
+{  21 x 14 and one pixel of slop is visible.                                  }
+{------------------------------------------------------------------------------}
+
+procedure DrawDigitGlyph (n : integer; var box : Rect);
+var ch : char;
+    fi : FontInfo;
+begin
+   ch := chr(ord('0') + n);
+   TextFont(fntCell);                    { 12-point tile: fits a 14-px cell }
+   if n >= 4 then TextFace([bold])
+             else TextFace([]);
+   GetFontInfo(fi);                      { metrics AFTER font+face are set }
+   MoveTo(box.left + (cellW - CharWidth(ch)) div 2,
+          box.top + (cellH + fi.ascent - fi.descent) div 2);
+   TextMode(srcOr);                      { transparent: the cell background stays }
+   DrawChar(ch);
+   TextFace([])                          { leave the port plain for the next caller }
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawCell {c, r : integer};
+var box   : Rect;
+    inner : Rect;
+    showMine : boolean;
+begin
+   if myWindow = nil then exit(DrawCell);      { window went back to the Filer }
+   SetPort(myWindow);                          { all drawing needs a port - 06-lib-qd-a }
+   CellRect(c, r, box);
+
+   with myDoc^ do begin
+
+      if cells[r, c].isRevealed and not cells[r, c].isMine then begin
+         { --- REVEALED, SAFE: flat white, sunken against the bevels. ------- }
+         EraseRect(box);                       { white floor }
+         PenNormal;
+         PenPat(gray);                         { the thin grid line: gray, so it   }
+                                               { recedes next to the black frame   }
+         MoveTo(box.left, box.bottom - 1);     { bottom edge ... }
+         LineTo(box.right - 1, box.bottom - 1);
+         LineTo(box.right - 1, box.top);       { ... and right edge }
+         PenPat(black);                        { restore the pen for whoever is next }
+         if cells[r, c].adjMines > 0 then
+            DrawDigitGlyph(cells[r, c].adjMines, box)
+      end
+
+      else if cells[r, c].isRevealed and cells[r, c].isMine then begin
+         { --- THE FATAL MINE (the only revealed mine the rules produce). --- }
+         { Drawn like a revealed cell, then everything inverted: a white     }
+         { mine on a black cell, the loudest thing a 1-bit screen can say.   }
+         EraseRect(box);
+         DrawMineGlyph(box);
+         inner := box;
+         InsetRect(inner, 1, 1);               { keep the grid seam un-inverted }
+         InvertRect(inner)
+      end
+
+      else begin
+         { --- COVERED: the raised bevel. ----------------------------------- }
+         FillRect(box, ltGray);                { the gray pillow - 06-lib-qd-a patterns }
+         PenNormal;
+         PenPat(white);                        { light from the upper left:    }
+         MoveTo(box.left, box.bottom - 2);     { white highlight up the left   }
+         LineTo(box.left, box.top);            { edge ...                      }
+         LineTo(box.right - 2, box.top);       { ... and across the top        }
+         PenPat(black);                        { shadow along bottom and right }
+         MoveTo(box.left, box.bottom - 1);
+         LineTo(box.right - 1, box.bottom - 1);
+         LineTo(box.right - 1, box.top);
+
+         { What sits ON the covered cell depends on the endgame:              }
+         {   - mid-game: the player's flag, if any;                           }
+         {   - after a LOSS: every unflagged mine is exposed (drawn on the    }
+         {     bevel -- the cells stay unrevealed in the data, this is purely }
+         {     presentation), and a flag on a NON-mine is shown as a mine     }
+         {     with an X through it: "this flag was wrong".                   }
+         showMine := false;
+         if state = msLost then
+            if cells[r, c].isMine and (not cells[r, c].isFlagged) then
+               showMine := true;
+
+         if showMine then
+            DrawMineGlyph(box)
+         else if cells[r, c].isFlagged then begin
+            if (state = msLost) and (not cells[r, c].isMine) then begin
+               DrawMineGlyph(box);              { the mine that wasn't there ... }
+               PenNormal;                       { ... struck through corner to corner }
+               MoveTo(box.left + 3, box.top + 2);
+               LineTo(box.right - 4, box.bottom - 3);
+               MoveTo(box.right - 4, box.top + 2);
+               LineTo(box.left + 3, box.bottom - 3)
+            end
+            else
+               DrawFlagGlyph(box)
+         end
+      end
+
+   end
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawBoard;
+var c, r  : integer;
+    frame : Rect;
+begin
+   if myWindow = nil then exit(DrawBoard);
+   SetPort(myWindow);
+
+   for r := 1 to myDoc^.rows do
+      for c := 1 to myDoc^.cols do
+         DrawCell(c, r);
+
+   { The 1-pixel black frame, one pixel OUTSIDE the cells, so the board sits  }
+   { on the window instead of floating.  FrameRect draws INSIDE its rect,     }
+   { hence the 1-pixel outset.                                                }
+   SetRect(frame, boardLeft - 1, boardTop - 1,
+                  boardLeft + myDoc^.cols * cellW + 1,
+                  boardTop + myDoc^.rows * cellH + 1);
+   PenNormal;
+   FrameRect(frame)
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawCounter;
+var well : Rect;
+begin
+   if myWindow = nil then exit(DrawCounter);
+   SetPort(myWindow);
+   CounterWell(well);
+   DrawWell(well);
+   { mines minus flags: the player's running estimate of what is left.        }
+   DrawReadout(myDoc^.mineCount - myDoc^.flagsPlaced, well)
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawTimer;
+var well : Rect;
+begin
+   if myWindow = nil then exit(DrawTimer);
+   SetPort(myWindow);
+   TimerWell(well);
+   { NOTE: no DrawWell here.  The frame was painted by DrawStatusBar; the     }
+   { once-a-second tick repaints only the digits (DrawReadout erases only     }
+   { the digit area).  Keeping this call cheap is what lets the idle loop     }
+   { call it freely (03-app-template; the Clock's idle pattern).              }
+   DrawReadout(myDoc^.elapsed, well)
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawFace {pressed : boolean};
+var btn, face, ii : Rect;
+    cx, cy : integer;
+begin
+   if myWindow = nil then exit(DrawFace);
+   SetPort(myWindow);
+   FaceRect(btn);
+
+   { The button plate: white, round-cornered, black frame.  The corner ovals  }
+   { are 9 x 6 -- 3:2 again, so the corners curve evenly on glass.            }
+   EraseRoundRect(btn, 9, 6);
+   PenNormal;
+   FrameRoundRect(btn, 9, 6);
+
+   cx := (btn.left + btn.right) div 2;
+   cy := (btn.top + btn.bottom) div 2;
+
+   { The face proper: an 18 x 12 oval (3:2 = a circle on screen).             }
+   SetRect(face, cx - 9, cy - 6, cx + 9, cy + 6);
+   FrameOval(face);
+
+   if pressed then begin
+      { WORRIED -- the mouse is down on a cell and anything could happen:     }
+      { round eyes and a little "o" of a mouth.                               }
+      SetRect(ii, cx - 5, cy - 3, cx - 3, cy - 1);  PaintOval(ii);
+      SetRect(ii, cx + 3, cy - 3, cx + 5, cy - 1);  PaintOval(ii);
+      SetRect(ii, cx - 2, cy + 1, cx + 2, cy + 4);  FrameOval(ii)
+   end
+   else if myDoc^.state = msLost then begin
+      { DEAD -- X eyes, flat mouth.  Each X is two crossed 3-pixel strokes.   }
+      PenNormal;
+      MoveTo(cx - 6, cy - 4);  LineTo(cx - 3, cy - 2);
+      MoveTo(cx - 3, cy - 4);  LineTo(cx - 6, cy - 2);
+      MoveTo(cx + 3, cy - 4);  LineTo(cx + 6, cy - 2);
+      MoveTo(cx + 6, cy - 4);  LineTo(cx + 3, cy - 2);
+      MoveTo(cx - 4, cy + 3);  LineTo(cx + 4, cy + 3)
+   end
+   else if myDoc^.state = msWon then begin
+      { COOL -- sunglasses: a filled band across both eyes with a bridge,     }
+      { and the smile.  FrameArc angles: 0 = straight up, positive =          }
+      { clockwise, so (90, 180) sweeps from 3 o'clock through 6 to 9 --      }
+      { the bottom half of the mouth oval, i.e. a smile (06-lib-qd-a,         }
+      { section 12).                                                          }
+      SetRect(ii, cx - 7, cy - 4, cx - 1, cy - 1);  PaintRect(ii);
+      SetRect(ii, cx + 1, cy - 4, cx + 7, cy - 1);  PaintRect(ii);
+      MoveTo(cx - 1, cy - 3);  LineTo(cx + 1, cy - 3);
+      SetRect(ii, cx - 4, cy - 1, cx + 4, cy + 5);
+      FrameArc(ii, 90, 180)
+   end
+   else begin
+      { SMILING -- the default: dot eyes and the same lower-half-arc smile.   }
+      SetRect(ii, cx - 5, cy - 4, cx - 3, cy - 2);  PaintOval(ii);
+      SetRect(ii, cx + 3, cy - 4, cx + 5, cy - 2);  PaintOval(ii);
+      SetRect(ii, cx - 4, cy - 2, cx + 4, cy + 4);
+      FrameArc(ii, 90, 180)
+   end
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawStatusBar;
+var well : Rect;
+begin
+   if myWindow = nil then exit(DrawStatusBar);
+   SetPort(myWindow);
+   DrawCounter;                      { draws its own well }
+   TimerWell(well);
+   DrawWell(well);                       { the timer's well frame ... }
+   DrawReadout(myDoc^.elapsed, well);    { ... and its current digits }
+   DrawFace(false)
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawContents {window : WindowPtr};
+begin
+   if window = nil then exit(DrawContents);
+   SetPort(window);                      { direct QuickDraw at this window - 06-lib-qd-a }
+   ClipRect(window^.portRect);           { clip to the content area; during an  }
+                                         { update, drawing is FURTHER clipped   }
+                                         { to the damaged region by visRgn      }
+                                         { (BeginUpdate, 06-lib-wm-a)           }
+   EraseRect(window^.portRect);          { white the whole content ... }
+   DrawStatusBar;                        { ... then rebuild it: status bar ... }
+   DrawBoard                             { ... and board.  Nothing else exists: }
+                                         { no scroll bars, no grow box -- the   }
+                                         { window is exactly board-sized.       }
+end;
+
+end.

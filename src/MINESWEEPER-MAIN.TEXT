@@ -1,0 +1,1063 @@
+{==============================================================================}
+{                                                                              }
+{  MINESWEEPER-MAIN.TEXT  --  program Minesweeper                              }
+{                                                                              }
+{  The main program: process bring-up, the two-phase event loop, the event     }
+{  dispatcher, menu commands, the Filer handshake, and shutdown.  If you are   }
+{  reading this source to learn how an LOS application works, START HERE and   }
+{  read top to bottom; the units hold the details this file orchestrates:      }
+{                                                                              }
+{     MSGlobals  constants, types, shared globals, the Filer-op handler        }
+{     MSGame     the rules (no UI)                                             }
+{     MSDraw     all QuickDraw rendering + board geometry                      }
+{     MSDialog   the two Field Editor dialogs                                  }
+{                                                                              }
+{  THE LIFECYCLE (01-orientation section 9): the Filer launches us with       }
+{  Make_Process; we InitGraf + OpenWm + Initialize; the Filer lends us a      }
+{  window via an fcNone filer event; we loop on GetEvent until an             }
+{  fcTerminate sets toldToDie; falling off the end of the program fires the   }
+{  SYS_TERMINATE exception, which runs LastWishes.  We are a GUEST at every   }
+{  step: the Filer owns our window and our life, the Window Manager owns the  }
+{  screen and the event stream.  We react; we almost never initiate.          }
+{                                                                              }
+{  A note on routine ordering: Lisa Pascal requires declare-before-use.  The  }
+{  Calculator solves this by declaring every routine FORWARD and defining     }
+{  bodies alphabetically (APHP-HP.TEXT:435, and 03-app-template section 1).   }
+{  This program's call graph happens to be acyclic, so the routines are       }
+{  simply defined callees-first -- reading order IS dependency order, which   }
+{  suits a teaching source.                                                    }
+{                                                                              }
+{  The tool number appears NOWHERE in this file (or any source file): we      }
+{  learn it at run time from our own pathname -- see step 5 of Initialize.    }
+{                                                                              }
+{==============================================================================}
+
+program Minesweeper;
+
+uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-lib-sm   }
+     (*$U UnitHz.obj *)         UnitHz,      { heap zones                - 06-lib-sm   }
+     (*$U Storage.obj *)        Storage,     { InitHeap, theHeap         - 06-lib-qd-b }
+     (*$U QuickDraw.obj *)      QuickDraw,   { InitGraf, thePort, drawing - 06-lib-qd-a }
+     (*$U Fontmgr.obj *)        FontMgr,     { font numbers              - 06-lib-fm   }
+     (*$U dbenv.obj *)          dbenv,       { open-array types under FEdec }
+     (*$U FEdec.obj *)          FEdec,       { field types (FETerminate lives on them) }
+     (*$U fld.obj *)            fieldedit,   { FETerminate               - 06-lib-fe   }
+     (*$U libos/SysCall.obj *)  SysCall,     { processes, data segs, exceptions - 05-os-syscalls }
+     (*$U wm.events.obj *)      Events,      { GetEvent, EventAvail, ImActive, Time - 06-lib-wm-a }
+     (*$U wm.folders.obj *)     Folders,     { OpenWm, TakeControl, FolderSize ... - 06-lib-wm-a }
+     (*$U wm.menus.obj *)       Menus,       { MenuSelect, MenuKey, CheckItem - 06-lib-wm-b }
+     (*$U AlertMgr.obj *)       AlertMgr,    { InitMP, alerts            - 06-lib-am   }
+     (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
+     (*$U WMlCrs.obj *)         WMLCrs,      { InitWmlCrs                - 06-lib-sb   }
+     (*$U FilerComm.obj *)      FilerComm,   { TellFiler, DoFilingCmd    - 06-lib-fc   }
+     (*$U MINESWEEPER-GLOBALS.OBJ *) MSGlobals,
+     (*$U MINESWEEPER-GAME.OBJ *)    MSGame,
+     (*$U MINESWEEPER-DRAW.OBJ *)    MSDraw,
+     (*$U MINESWEEPER-DIALOG.OBJ *)  MSDialog;
+{ No WMLsb (scroll bars) and no WMLgrow (grow box): the window is exactly     }
+{ board-sized and never scrolls or resizes by hand, so InitWmlSb/sbCreate     }
+{ are never called and their units are not linked.  No FPlib/MathLib either:  }
+{ Minesweeper is integer arithmetic through and through, which also keeps     }
+{ IOSFPLIB off the link line (02-workshop-build section 7.2).                 }
+
+const
+   segLDSN = 2;      { the Logical Data Segment Number our document segment    }
+                     { binds to.  An LDSN is a slot in this process's address  }
+                     { space (05-os-syscalls section 4); the choice just has   }
+                     { to dodge slots other libraries claim (OpenWM maps the   }
+                     { shared WM segment at ldsn 15).  2 is what the           }
+                     { Calculator dedicates to its own segment.                }
+
+
+{==============================================================================}
+{  The three required callbacks (03-app-template section 10)                   }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+{  OutOfHeapSpace -- the grow-zone callback InitHeap installs on our private  }
+{  heap.  Called when an allocation cannot be satisfied; the return value is  }
+{  how many bytes we managed to free.  We free nothing (there is nothing      }
+{  cached to throw away), so the allocation fails cleanly -- the caller sees  }
+{  a nil handle / heap error and copes.  This is the Calculator's answer too  }
+{  (APHP-HP.TEXT:2982; 03-app-template section 10.2).                          }
+{------------------------------------------------------------------------------}
+
+function OutOfHeapSpace (hz : THz; bytesNeeded : integer) : integer;
+begin
+   OutOfHeapSpace := 0
+end;
+
+{------------------------------------------------------------------------------}
+{  AlertFailed -- the Alert Manager's errProc: called when an alert cannot    }
+{  be DISPLAYED (e.g. the phrase file has gone unreadable).  The message      }
+{  system itself has failed, so we cannot report by alert.  During            }
+{  Initialize that is fatal: tell the Filer we never got started (the        }
+{  unsolicited initFailed message -- uniquely, NOT followed by ImDying,       }
+{  06-lib-fc) and halt.  After startup we shrug and carry on: the game is    }
+{  still playable even if a message could not be shown                        }
+{  (03-app-template section 10.3; the Clock's FailedAlert does the same).     }
+{------------------------------------------------------------------------------}
+
+procedure AlertFailed;
+var err : integer;
+begin
+   if initing then begin
+      TellFiler(err, initFailed, noMemory, nil);   { nil: no window exists yet }
+      Halt
+   end
+   { else: note it silently and continue -- alertError holds the code if      }
+   { anyone cares to inspect it in a debugger.                                }
+end;
+
+{------------------------------------------------------------------------------}
+{  LastWishes -- the SYS_TERMINATE exception handler, installed as the VERY   }
+{  first act of Initialize.  The OS runs it on EVERY exit: a clean            }
+{  fcTerminate, falling off the end of the program, or a crash (bus error,    }
+{  the works) -- one shutdown path for all of them (01-orientation 2.4).      }
+{                                                                              }
+{  ImDying MUST BE THE FIRST STATEMENT.  Until we call it, the Filer (and     }
+{  with it the whole desktop) is blocked waiting on us; a terminate handler   }
+{  that crashes before ImDying hangs the machine (libfc-FILERCOMM.TEXT:107,   }
+{  03-app-template section 10.1).                                              }
+{                                                                              }
+{  What we deliberately do NOT do here: save the game.  There is nothing to   }
+{  save -- the document IS the data segment, every field written in place,    }
+{  and the OS preserves a data segment's backing file even when its process   }
+{  dies without closing it.  On a clean death the segment was already closed  }
+{  by the fcTerminate handler; after a crash the next launch's Open_DataSeg   }
+{  reports warning -321 ("left open, data possibly corrupt") and the version  }
+{  stamp check in Initialize decides whether to trust the contents            }
+{  (05-os-syscalls section 1.6).                                               }
+{------------------------------------------------------------------------------}
+
+procedure LastWishes (environPtr : p_env_blk; excepDataPtr : p_ex_data);
+begin
+   ImDying;                   { FIRST.  Unblocks the Filer; the WM reclaims    }
+                              { our windows and events (06-lib-wm-a ImDying).  }
+
+   { excepDataPtr^[0] carries the cause of death (call_term, ended, killed,   }
+   { bus_error ... -- 05-os-syscalls section 1.7) if we ever wanted to        }
+   { distinguish a crash from a clean exit; with nothing to salvage, we do    }
+   { not need to.                                                              }
+
+   FETerminate;               { Hand a field left on the Clipboard off as      }
+                              { universal text so it can still be pasted into  }
+                              { other apps after we are gone (06-lib-fe        }
+                              { FETerminate).  Safe even if no field was ever  }
+                              { cut: it no-ops unless we own the scrap.        }
+
+   Halt                       { End the process for good. }
+end;
+
+
+{==============================================================================}
+{  Small helpers                                                               }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+{  NumToStr -- non-negative integer to decimal text, no leading zeros.  Used  }
+{  to fill alert parameters (^1, ^2 ...).  These strings feed ParamAlert;     }
+{  they are NUMERALS, not language, so building them in code does not         }
+{  violate the no-literal-strings rule.                                        }
+{------------------------------------------------------------------------------}
+
+procedure NumToStr (n : integer; var s : Str255);
+var divisor : integer;
+    d       : integer;
+    started : boolean;
+begin
+   s := '';
+   divisor := 10000;                     { integers are 16-bit: 5 digits max }
+   started := false;
+   while divisor > 0 do begin
+      d := (n div divisor) mod 10;
+      if (d <> 0) or started or (divisor = 1) then begin
+         s := concat(s, ' ');            { grow by one ... }
+         s[length(s)] := chr(ord('0') + d);   { ... and drop the digit in }
+         started := true
+      end;
+      divisor := divisor div 10
+   end
+end;
+
+{------------------------------------------------------------------------------}
+{  Num3Str -- integer 0..999 as exactly three digits, zero-padded ('007').    }
+{  The best-times lines use this so the columns align in the alert box.       }
+{------------------------------------------------------------------------------}
+
+procedure Num3Str (n : integer; var s : Str255);
+begin
+   if n < 0 then n := 0;                 { defensive; times are never negative }
+   if n > 999 then n := 999;
+   s := '000';
+   s[1] := chr(ord('0') + n div 100);
+   s[2] := chr(ord('0') + (n div 10) mod 10);
+   s[3] := chr(ord('0') + n mod 10)
+end;
+
+{------------------------------------------------------------------------------}
+{  UpdateElapsed -- bring myDoc^.elapsed up to date from the wall clock.      }
+{  elapsed = (Time - startRef) div 100: Time is hundredths of a second since  }
+{  boot (06-lib-wm-a Time) and startRef was set (or back-dated, on resume)    }
+{  when the game's clock started.  We DERIVE time; we never count loop        }
+{  iterations, which are not seconds.  Pegs at 999 like the original.         }
+{  Only a running game ticks: msFresh has not started, msWon/msLost are       }
+{  frozen at their final second.                                              }
+{------------------------------------------------------------------------------}
+
+procedure UpdateElapsed;
+var secs : longint;
+begin
+   if myDoc^.state = msPlaying then begin
+      secs := (Time - startRef) div 100;
+      if secs > maxTimer then secs := maxTimer;
+      myDoc^.elapsed := secs
+   end
+end;
+
+{------------------------------------------------------------------------------}
+{  UpdateTimer -- the Phase-B idle worker (see the main loop).  Must be       }
+{  CHEAP and must not draw unless the displayed second actually rolled        }
+{  over, because it runs on every idle pass.  This is the Clock's idle        }
+{  pattern (APCL-CLOCK.TEXT; 03-app-template section 11) -- and the reason    }
+{  Minesweeper needs NO timer subprocess: the Clock spawns one because it     }
+{  must tick while INACTIVE; our timer only needs to tick while the player    }
+{  is actually playing, i.e. while we are active and pumping Phase B.         }
+{------------------------------------------------------------------------------}
+
+procedure UpdateTimer;
+var oldSecs : integer;
+begin
+   if myWindow = nil then exit(UpdateTimer);       { no window, nothing to draw }
+   if myDoc^.state <> msPlaying then exit(UpdateTimer);
+   oldSecs := myDoc^.elapsed;
+   UpdateElapsed;
+   if myDoc^.elapsed <> oldSecs then
+      DrawTimer                          { repaints ONLY the digits (MSDraw) }
+end;
+
+{------------------------------------------------------------------------------}
+{  RefreshMenuState -- make the check marks and grays tell the truth.         }
+{  Called after anything that changes them (level switch, flag-mode toggle)   }
+{  and from PutUpMenus so a fresh activation is correct.  Marks are           }
+{  runtime-only: the phrase file cannot pre-check an item (06-lib-am, menu    }
+{  section notes).                                                             }
+{------------------------------------------------------------------------------}
+
+procedure RefreshMenuState;
+begin
+   { The current level wears the check mark. }
+   CheckItem(myMenus[mLevel], miBeginner,     myDoc^.level = lvBeginner);
+   CheckItem(myMenus[mLevel], miIntermediate, myDoc^.level = lvIntermediate);
+   CheckItem(myMenus[mLevel], miExpert,       myDoc^.level = lvExpert);
+   CheckItem(myMenus[mLevel], miCustom,       myDoc^.level = lvCustom);
+
+   { Flag Mode carries a check while plain clicks plant flags. }
+   CheckItem(myMenus[mGame], miFlagMode, myDoc^.flagMode);
+
+   { The Edit menu sleeps except while a Field Editor dialog is up: its       }
+   { items act on a focused field, and outside a dialog there is none.        }
+   { MSDialog enables them for the dialog's lifetime and re-grays them        }
+   { after; this re-assertion covers the initial state.  (An Edit menu that   }
+   { is ALWAYS gray would be worse than none -- ours earns its keep inside    }
+   { the dialogs, cf. the Calculator's ChkEditMenu, APHP-HP.TEXT:757.)        }
+   DisableItem(myMenus[mEdit], miUndo);
+   DisableItem(myMenus[mEdit], miCut);
+   DisableItem(myMenus[mEdit], miCopy);
+   DisableItem(myMenus[mEdit], miPaste)
+end;
+
+{------------------------------------------------------------------------------}
+{  PutUpMenus -- install our menu bar.  The bar belongs to whichever process  }
+{  is active, and TakeControl cleared it, so EVERY folderActivate rebuilds    }
+{  it from scratch (03-app-template section 8.1).                              }
+{------------------------------------------------------------------------------}
+
+procedure PutUpMenus;
+var m : integer;
+begin
+   ClearMenuBar;                         { drop whatever menus are up - 06-lib-wm-b }
+   for m := mFile to lastMenu do
+      InsertMenu(myMenus[m], 0);         { 0 = append at the right end }
+   RefreshMenuState;                     { truth before paint }
+   DrawMenuBar                           { one repaint for the batch }
+end;
+
+{------------------------------------------------------------------------------}
+{  doUpdateEvent -- the update-protocol bracket around the full repaint       }
+{  (03-app-template section 9.1).  'normal' distinguishes a real              }
+{  folderUpdate (bracket with BeginUpdate/EndUpdate so drawing clips to the   }
+{  damage and the update region is consumed) from a forced first paint        }
+{  (draw everything, no update region involved).                              }
+{------------------------------------------------------------------------------}
+
+procedure doUpdateEvent (normal : boolean; window : WindowPtr);
+begin
+   if normal then BeginUpdate(window);   { clip := the damaged region - 06-lib-wm-a }
+   DrawContents(window);                 { MSDraw: erase, status bar, board }
+   if normal then EndUpdate(window)      { restore the full visRgn }
+end;
+
+
+{==============================================================================}
+{  Game orchestration -- where rules (MSGame), pixels (MSDraw), time and      }
+{  alerts meet.                                                                }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+{  StartLevel -- begin a fresh game, optionally asking first.  Handles the    }
+{  window-size change a level switch causes.                                  }
+{------------------------------------------------------------------------------}
+
+procedure StartLevel (newLevel : MSLevel; w, h, m : integer; confirm : boolean);
+begin
+   { "Start a new game?  The game in progress will be lost." -- but ONLY      }
+   { when one actually is in progress: a fresh or finished board has nothing  }
+   { to lose and the question would be noise.  CautionAlert returns true for  }
+   { OK (alert 10 is authored 'caution ok alert': OK is the default button).  }
+   if confirm and (myDoc^.state = msPlaying) then
+      if not CautionAlert(allAlerts, alrtNewGame) then
+         exit(StartLevel);
+
+   StartNewGame(newLevel, w, h, m);      { MSGame: fresh mineless board }
+
+   { The window is exactly as big as the board needs -- no grow box, no       }
+   { scroll bars -- so every level change resizes it.  ComputeLayout          }
+   { refreshes contentW/H (the fit arithmetic lives with the constants in     }
+   { MSGlobals); FolderSize clamps to the 720 x 364 screen, which we proved   }
+   { can never bite (06-lib-wm-a FolderSize).                                 }
+   ComputeLayout;
+   if myWindow <> nil then begin
+      FolderSize(myWindow, contentW, contentH, false);
+      { fUpdate = false: FolderSize repaints windows WE uncovered but leaves  }
+      { our own content to us.  We are about to paint all of it anyway:       }
+      { declare it valid (so no redundant folderUpdate arrives) and paint     }
+      { once, the same move InitNewDoc makes (03-app-template section 11).    }
+      SetPort(myWindow);                 { ValidRect works on the current port }
+      ValidRect(myWindow^.portRect);
+      doUpdateEvent(false, myWindow)
+   end;
+
+   RefreshMenuState                      { the level check mark moved }
+end;
+
+{------------------------------------------------------------------------------}
+{  ShowBestTimes -- the Best Times alert.  Formats each fixed level as ONE    }
+{  string ('012  Alex') so three ParamAlert slots cover all three levels --   }
+{  ^1/^2/^3 in alert 30's text.  A level with no record shows the phrase-     }
+{  file's placeholder line instead.                                           }
+{------------------------------------------------------------------------------}
+
+procedure ShowBestTimes;
+var s1, s2, s3 : Str255;
+
+   procedure OneLine (lv : MSLevel; var s : Str255);
+   var t : Str255;
+   begin
+      if myDoc^.bestTime[lv] = noBest then begin
+         s := '';
+         GetAlert(allAlerts, phNoBest, @s)   { localized "none yet" - 06-lib-am }
+      end
+      else begin
+         Num3Str(myDoc^.bestTime[lv], t);    { zero-padded so columns align }
+         s := concat(t, '  ', myDoc^.bestName[lv])
+         { The two spaces are layout, not language; the words all came from   }
+         { the phrase file or the player.                                     }
+      end
+   end;
+
+begin
+   OneLine(lvBeginner, s1);
+   OneLine(lvIntermediate, s2);
+   OneLine(lvExpert, s3);
+   ParamAlert(s1, s2, s3);               { fill ^1..^3 BEFORE the alert draws - 06-lib-am }
+   NoteAlert(allAlerts, alrtBest)
+end;
+
+{------------------------------------------------------------------------------}
+{  DoWin -- the game was just won (state flipped to msWon inside              }
+{  RevealCell).  Celebrate, then handle the record book.                      }
+{------------------------------------------------------------------------------}
+
+procedure DoWin;
+var s1, s2 : Str255;
+    nm     : Str255;
+begin
+   { The board is already fully drawn by our caller (auto-flags included);    }
+   { the face gets its sunglasses and the counter shows 000.                  }
+   DrawFace(false);
+   DrawCounter;
+   DrawTimer;                            { the frozen final second }
+
+   { "You swept all ^1 mines in ^2 seconds." }
+   NumToStr(myDoc^.mineCount, s1);
+   NumToStr(myDoc^.elapsed, s2);
+   ParamAlert(s1, s2, '');               { third slot unused; empty is fine }
+   NoteAlert(allAlerts, alrtWin);
+
+   { Records are kept for the three FIXED levels only: a custom board can be  }
+   { trivially easy, so custom games never touch the book.  noBest (maxint-   }
+   { ish) makes the first real win at a level an automatic record.            }
+   if myDoc^.level <> lvCustom then
+      if myDoc^.elapsed < myDoc^.bestTime[myDoc^.level] then
+         { A record!  Ask who to credit -- the Field Editor name dialog.      }
+         { Cancelling the dialog declines the record: the book only holds     }
+         { entries their owners chose to sign.                                }
+         if DoNameDialog(nm) then begin
+            myDoc^.bestTime[myDoc^.level] := myDoc^.elapsed;
+            myDoc^.bestName[myDoc^.level] := nm
+            { Both live in the data segment: the record book survives         }
+            { everything short of Reset Best Times.                           }
+         end
+end;
+
+{------------------------------------------------------------------------------}
+{  DoLose -- the game was just lost.  NO modal box: a loss happens dozens of  }
+{  times an hour and an alert on every one would be intolerable.  The board   }
+{  tells the story (every mine exposed, the fatal one inverted, wrong flags   }
+{  crossed out -- MSDraw), the face dies, and a medium beep marks the moment  }
+{  (BeepAlert honours the user's beep-vs-flash preference, 06-lib-am).        }
+{------------------------------------------------------------------------------}
+
+procedure DoLose;
+begin
+   DrawBoard;                            { shows all mines now that state = msLost }
+   DrawFace(false);                      { X eyes }
+   BeepAlert(2)                          { medium: audible but not alarming }
+end;
+
+{------------------------------------------------------------------------------}
+{  TrackFacePress -- press feedback on the reset button: invert while held,   }
+{  act only if released inside (roll off to abort) -- the standard button     }
+{  bargain.  StillDown, not Button: it turns false as soon as the release is  }
+{  QUEUED, so we cannot outrun the event stream (06-lib-wm-a StillDown).      }
+{------------------------------------------------------------------------------}
+
+function TrackFacePress : boolean;
+var box : Rect;
+    pt  : Point;
+begin
+   FaceRect(box);
+   SetPort(myWindow);
+   InvertRoundRect(box, 9, 6);           { pressed look }
+   while StillDown do
+      LetOthersRun;                      { never spin without yielding }
+   InvertRoundRect(box, 9, 6);           { released look }
+   GetMouse(pt);                         { where the button came up, local coords }
+   TrackFacePress := PtInRect(pt, box)
+end;
+
+{------------------------------------------------------------------------------}
+{  DoBoardClick -- a buttonDown in our window: the input rules of section     }
+{  5.4, verbatim:                                                              }
+{                                                                              }
+{     buttonDown in a covered cell:                                            }
+{        Option held (theEvent.codeKey) or Flag Mode on  -> toggle flag        }
+{        else                                            -> reveal             }
+{     buttonDown in a revealed number:                                         }
+{        double-click (same cell, within clickDelay) and                       }
+{        adjacent flags = the number                     -> chord              }
+{     buttonDown in the reset button                     -> new game           }
+{------------------------------------------------------------------------------}
+
+procedure DoBoardClick;
+var c, r : integer;
+    box  : Rect;
+    gameOver : boolean;
+begin
+   { The reset button works whatever state the game is in -- it is the way    }
+   { OUT of a finished game.  No confirmation: resetting mid-game is an       }
+   { deliberate two-step (press, release inside), and the original never      }
+   { asked either.                                                            }
+   FaceRect(box);
+   if PtInRect(theEvent.where, box) then begin
+      if TrackFacePress then
+         StartLevel(myDoc^.level, myDoc^.cols, myDoc^.rows, myDoc^.mineCount,
+                    false);              { same board parameters, fresh deal }
+      exit(DoBoardClick)
+   end;
+
+   if not PointToCell(theEvent.where, c, r) then
+      exit(DoBoardClick);                { dead space between board and frame }
+
+   { A finished board is inert -- only the reset button (above) or the menus  }
+   { start the next game.                                                     }
+   if (myDoc^.state = msWon) or (myDoc^.state = msLost) then
+      exit(DoBoardClick);
+
+   { Freeze the clock at the truth BEFORE the move: if this click wins or     }
+   { loses, elapsed must hold the second the game actually ended, not the     }
+   { last idle tick.                                                          }
+   UpdateElapsed;
+
+   if not myDoc^.cells[r, c].isRevealed then begin
+
+      if theEvent.codeKey or myDoc^.flagMode then begin
+         { Option-click (codeKey is the Option key, 06-lib-wm-a section 1.1) }
+         { -- or any click in Flag Mode -- plants or lifts a flag.           }
+         ToggleFlag(c, r);
+         DrawCell(c, r);                 { one cell changed ... }
+         DrawCounter                 { ... and the count readout }
+      end
+      else begin
+         { A reveal.  The face worries while fate is decided -- pure          }
+         { theatre, but it is THE minesweeper gesture.                        }
+         DrawFace(true);
+
+         if myDoc^.state = msFresh then begin
+            { FIRST CLICK of the game: only now are the mines placed, and     }
+            { never on or beside this cell -- first-click safety (see         }
+            { PlaceMines in MSGame).  This is also the moment the timer       }
+            { starts: on the first REVEAL, not on New Game.                   }
+            PlaceMines(c, r);
+            myDoc^.elapsed := 0;
+            startRef := Time;            { the clock's zero point - 06-lib-wm-a Time }
+            DrawTimer
+         end;
+
+         RevealCell(c, r);
+         gameOver := (myDoc^.state = msLost) or (myDoc^.state = msWon);
+
+         if myDoc^.state = msLost then
+            DoLose                       { redraws board + face, beeps }
+         else begin
+            { A reveal can flood dozens of cells; repaint the board rather    }
+            { than track which ones (DrawBoard repaints every pixel of every  }
+            { cell identically, so untouched cells do not flicker -- MSDraw). }
+            DrawBoard;
+            if myDoc^.state = msWon then DoWin
+                                    else DrawFace(false)   { calm again }
+         end;
+         if gameOver then DrawTimer      { show the frozen final second }
+      end
+   end
+
+   else begin
+      { A click on a REVEALED cell: only interesting as the second half of a  }
+      { double-click chord.  Both halves must land on the SAME cell within   }
+      { clickDelay -- theEvent.when and clickDelay share the hundredths      }
+      { clock (06-lib-wm-a) -- because two quick clicks on different cells   }
+      { are two clicks, not a double.                                        }
+      if (theEvent.when - lastClkTime < clickDelay) and
+         (c = lastClkCol) and (r = lastClkRow) then begin
+         ChordCell(c, r);                { no-op unless flags match the number }
+         if myDoc^.state = msLost then begin
+            DoLose;
+            DrawTimer
+         end
+         else begin
+            DrawBoard;                   { the chord may have opened a region }
+            if myDoc^.state = msWon then begin
+               DoWin;
+               DrawTimer
+            end
+         end
+      end
+   end;
+
+   { Remember this click for the next one's double-click test. }
+   lastClkTime := theEvent.when;
+   lastClkCol  := c;
+   lastClkRow  := r
+end;
+
+
+{==============================================================================}
+{  Lifecycle: window arrival, menu commands, the dispatcher                    }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+{  InitNewDoc -- the Filer said fcNone and lent us a window (theEvent.who):   }
+{  take it, fill in the document (defaults on a first-ever launch, restored   }
+{  state otherwise), size the window, paint once.                             }
+{  (03-app-template section 11, distilled from APHP-HP.TEXT:2172-2384.)       }
+{------------------------------------------------------------------------------}
+
+procedure InitNewDoc (window : WindowPtr);
+var lv : MSLevel;
+begin
+   myWindow := window;                   { remember the loan }
+   TakeWindow(myWindow);                 { claim ownership: re-points the       }
+                                         { window's process to us so events     }
+                                         { route here (06-lib-wm-a TakeWindow)  }
+
+   if useDefaults then begin
+      { The data segment was created fresh (or its contents were stale):      }
+      { build the factory document.                                           }
+      myDoc^.version := msDocVersion;    { stamp it so the next launch trusts it }
+      for lv := lvBeginner to lvExpert do begin
+         myDoc^.bestTime[lv] := noBest;  { empty record book }
+         myDoc^.bestName[lv] := ''
+      end;
+      myDoc^.flagMode := false;
+      myDoc^.customW := intCols;         { plausible first Custom suggestion:   }
+      myDoc^.customH := intRows;         { the Intermediate board               }
+      myDoc^.customM := intMines;
+      StartNewGame(lvBeginner, begCols, begRows, begMines);
+      useDefaults := false
+   end
+   else begin
+      { myDoc^ already holds the reopened segment: the exact board, flags,    }
+      { timer and record book from last time -- Set Aside and reopen land     }
+      { here, mid-game if that is how it was left.  The ONLY thing to redo    }
+      { is the clock's reference point, because startRef is wall-clock        }
+      { ("hundredths since boot") and this may be a different boot: back-     }
+      { date it so the timer CONTINUES from the saved second rather than     }
+      { restarting -- time spent set aside costs the player nothing.          }
+      if myDoc^.state = msPlaying then
+         startRef := Time - myDoc^.elapsed * 100
+   end;
+
+   ComputeLayout;                        { contentW/H for the restored level }
+   FolderSize(myWindow, contentW, contentH, false);  { size the loan to fit - 06-lib-wm-a }
+   SetPort(myWindow);
+   ValidRect(myWindow^.portRect);        { content is about to be fresh: no     }
+                                         { update event needed for it           }
+   doUpdateEvent(false, myWindow);       { the one forced full paint }
+   RefreshMenuState
+end;
+
+{------------------------------------------------------------------------------}
+{  DoFilerEvent -- unpack and answer a Filer command.  The protocol itself    }
+{  lives in MSGlobals' HandleFilerOp (shared with the dialogs' nested         }
+{  loops); only fcNone needs the main program, because opening the window     }
+{  takes InitNewDoc and the drawing machinery.                                }
+{------------------------------------------------------------------------------}
+
+procedure DoFilerEvent;
+var wantsOpen : boolean;
+begin
+   HandleFilerOp(wantsOpen);
+   if wantsOpen then
+      InitNewDoc(theEvent.who)           { the lent window rides in the event }
+end;
+
+{------------------------------------------------------------------------------}
+{  MenuCommand -- dispatch a chosen menu item (from MenuSelect or MenuKey).   }
+{  The big nested case over (menu, item) -- 03-app-template section 8.2.      }
+{------------------------------------------------------------------------------}
+
+procedure MenuCommand (menu, item : integer);
+var err     : integer;
+    w, h, m : integer;
+    lv      : MSLevel;
+begin
+   case menu of
+
+      mFile :
+         case item of
+            miAsideAll :
+               { "Set Aside Everything": WE do not put windows away -- the    }
+               { Filer owns filing.  DoFilingCmd forwards the command; the    }
+               { close comes back to us as fcClose events (06-lib-fc 2.6).    }
+               DoFilingCmd(cmdClosAll);
+            miAside :
+               DoFilingCmd(cmdClose);
+            miPutAway :
+               begin
+                  { "Save & Put Away": nothing to save (the segment is        }
+                  { already the truth), so it reduces to telling the Filer    }
+                  { the document is closed and going home.  docPutBack is     }
+                  { the unsolicited put-back message (06-lib-fc; cf.          }
+                  { APHP-HP.TEXT:2549).  TellFiler hands the window over;     }
+                  { we just forget it.                                        }
+                  UpdateElapsed;         { freeze the clock at the truth first }
+                  TellFiler(err, docClosd, docPutBack, myWindow);
+                  myWindow := nil
+               end;
+         end;
+
+      mEdit :
+         { Edit items are disabled outside the dialogs, and MenuSelect /      }
+         { MenuKey never return disabled items (06-lib-wm-b), so this arm is  }
+         { unreachable here; the dialogs dispatch their own Edit commands.    }
+         { The empty case documents the intent.                               }
+         ;
+
+      mGame :
+         case item of
+            miNewGame :
+               StartLevel(myDoc^.level, myDoc^.cols, myDoc^.rows,
+                          myDoc^.mineCount, true);   { true: confirm if mid-game }
+            miFlagMode :
+               begin
+                  { The Flag Mode toggle: plain clicks plant flags while on.  }
+                  { The check mark IS the state display (5.2); flagMode       }
+                  { itself lives in the data segment, so the mode survives    }
+                  { Set Aside like everything else.                           }
+                  myDoc^.flagMode := not myDoc^.flagMode;
+                  CheckItem(myMenus[mGame], miFlagMode, myDoc^.flagMode)
+               end;
+            miBestTimes :
+               ShowBestTimes;
+            miResetBest :
+               { Destructive, so alert 40 asks first -- authored 'caution     }
+               { cancel alert': the DEFAULT button is Cancel, and a           }
+               { reflexive Return keeps the records (06-lib-am qualifiers).   }
+               if CautionAlert(allAlerts, alrtResetBest) then
+                  for lv := lvBeginner to lvExpert do begin
+                     myDoc^.bestTime[lv] := noBest;
+                     myDoc^.bestName[lv] := ''
+                  end;
+         end;
+
+      mLevel :
+         case item of
+            miBeginner :
+               StartLevel(lvBeginner, begCols, begRows, begMines, true);
+            miIntermediate :
+               StartLevel(lvIntermediate, intCols, intRows, intMines, true);
+            miExpert :
+               StartLevel(lvExpert, expCols, expRows, expMines, true);
+            miCustom :
+               begin
+                  { Confirm the loss of a game in progress BEFORE the player  }
+                  { spends effort in the dialog; the dialog's own Cancel      }
+                  { then still abandons the whole idea harmlessly.            }
+                  if myDoc^.state = msPlaying then
+                     if not CautionAlert(allAlerts, alrtNewGame) then
+                        exit(MenuCommand);
+                  if DoCustomDialog(w, h, m) then
+                     StartLevel(lvCustom, w, h, m, false)  { already confirmed }
+               end;
+         end;
+
+   end { case menu }
+end;
+
+{------------------------------------------------------------------------------}
+{  ProcessTheEvent -- the dispatcher: one case per event kind the Window      }
+{  Manager can deliver (03-app-template section 6).  Both phases of the main  }
+{  loop funnel every event through here.                                      }
+{------------------------------------------------------------------------------}
+
+procedure ProcessTheEvent;
+var theMenu, theItem : integer;
+begin
+   case theEvent.what of
+
+      buttonDown :
+         if theEvent.who = menuFolder then begin
+            { A pull on the menu bar (menuFolder is the shared menu-bar       }
+            { window, 06-lib-wm-a section 4).  MenuSelect runs the whole      }
+            { pull-down interaction and returns the choice, 0/0 for none.     }
+            MenuSelect(theEvent.where, theMenu, theItem);
+            if (theMenu <> 0) and (theItem <> 0) then
+               MenuCommand(theMenu, theItem);
+            HiLiteMenu(0)                { un-highlight the title afterwards }
+         end
+         else if theEvent.who = myWindow then
+            DoBoardClick;
+            { Clicks in other windows are not ours to handle; the WM routes   }
+            { activation itself.                                              }
+
+      buttonUp :
+         { Button releases are consumed inside the tracking loops (StillDown) }
+         { where they matter; the queued event itself needs nothing.          }
+         ;
+
+      keyDown :
+         { Route Apple-key combinations to MenuKey FIRST; ignore auto-        }
+         { repeats; everything else is not game input (the board is all       }
+         { mouse) -- section 5.4.                                             }
+         if (theEvent.who = myWindow) and (not theEvent.repeatKey) then
+            if theEvent.appleKey then begin
+               MenuKey(theEvent.ascii, theMenu, theItem);
+               if theMenu <> 0 then begin
+                  HiLiteMenu(theMenu);   { flash the title, like a real pull }
+                  MenuCommand(theMenu, theItem);
+                  HiLiteMenu(0)
+               end
+            end;
+
+      folderActivate :
+         begin
+            { We are becoming the active window.  TakeControl completes the   }
+            { WM's two-process handshake -- it will not finish the switch     }
+            { until we answer -- then the menu bar is ours to rebuild         }
+            { (01-orientation 6.3).                                           }
+            TakeControl(theEvent, false, false);   { false, false: fresh menus }
+                                                   { and dialog band           }
+            PutUpMenus
+         end;
+
+      folderDeactivate :
+         { Losing active status: nothing to dim (the board has no selection), }
+         { so the whole protocol is handing control onward.  GiveControl      }
+         { rewrites this event into the next window's folderActivate --       }
+         { mandatory, or the switch never completes (06-lib-wm-a).            }
+         GiveControl(theEvent);
+
+      folderUpdate :
+         { Some of our window was uncovered; redraw just the damage through   }
+         { the update bracket.                                                }
+         doUpdateEvent(true, theEvent.who);
+
+      folderMoved :
+         { The user dragged the window.  We cache no global coordinates       }
+         { (everything is window-local), so: nothing.                         }
+         ;
+
+      filerEvent :
+         DoFilerEvent;
+
+      abortEvent :
+         { Command-period.  Our only long operations are alerts (the Alert    }
+         { Manager handles its own), so: nothing to abort.                    }
+         ;
+
+      diedEvent, diskEvent, catalogEvent :
+         { Other processes' lives, diskettes, and the catalog are the         }
+         { Filer's business, not a game's.                                    }
+         ;
+
+      nilEvent :
+         { A spurious empty wake-up.  By design: nothing. }
+         ;
+
+      otherwise
+         { private1..private3: app-private event kinds.  The Clock uses      }
+         { private1 as its timer tick (delivered by its subprocess); we      }
+         { schedule nothing, so none should arrive -- but an explicit arm    }
+         { beats relying on unmatched-case behaviour.                        }
+
+   end { case }
+end;
+
+
+{==============================================================================}
+{  Initialize -- one-time process bring-up, between OpenWm and the loop.      }
+{  ORDER MATTERS; each step says why it sits where it does.  Every failure    }
+{  path must TellFiler(initFailed) and halt: until we answer, the Filer is    }
+{  blocked waiting on us and the whole desktop is frozen (01-orientation      }
+{  7.3, 03-app-template section 5).                                            }
+{==============================================================================}
+
+procedure Initialize;
+var err, feErr : integer;
+    schedErr   : integer;                { Sched_Class's result -- always 0, and     }
+                                         { kept SEPARATE so the bracket's restore    }
+                                         { call cannot clobber the result we are     }
+                                         { actually testing (a classic var-reuse bug)}
+    junkErr    : integer;                { results of best-effort cleanup calls      }
+    pcInfo     : procinfoRec;            { Info_Process's report - 05-os-syscalls 1.5 }
+    excName    : t_ex_name;              { exception name, string[16] - 05-os-syscalls 1.7 }
+    myPrefix   : TParamAlert;            { "<stem>-{tNN}", derived below - 06-lib-am }
+    cutAt      : integer;                { index of the '}' in our own path }
+    dsPath     : pathname;               { the data segment's full name }
+    segPtr     : longint;                { base address of the mapped segment }
+    lv         : MSLevel;
+begin
+   initing := true;                      { AlertFailed treats failures as fatal now }
+
+   { (1) FIRST: the terminate handler, before anything that could fail, so    }
+   { that even a crash later in Initialize still runs LastWishes and calls    }
+   { ImDying -- otherwise the system hangs (03-app-template 5.1).             }
+   excName := 'SYS_TERMINATE';
+   Declare_Excep_Hdl(err, excName, @LastWishes);   { 05-os-syscalls section 5 }
+   if err <> 0 then begin
+      TellFiler(err, initFailed, noMemory, nil);   { can't even install a      }
+      halt                                         { handler: give up cleanly  }
+   end;
+
+   { (2) Known state for the app-owned flags. }
+   toldToDie := false;
+   myWindow  := nil;
+   startRef  := 0;
+   lastClkTime := 0;
+   lastClkCol  := 0;
+   lastClkRow  := 0;
+
+   { (3) The private heap, carved out of the static myZone array.  Everything }
+   { we allocate (menu blocks, the alert cache, Field Editor fields) lives    }
+   { here, not in the shared WM heap (01-orientation 3.3).  OutOfHeapSpace    }
+   { is the it-filled-up callback.                                            }
+   InitHeap(@myZone[0], @myZone[maxHeap], @OutOfHeapSpace);   { 06-lib-qd-b Storage }
+
+   { (4) Who am I, and where on disk?  Info_Process may block on a segment    }
+   { swap, and a WM-launched app runs non-preemptive; drop to preemptive      }
+   { around the call so the OS can service the block (the false...true       }
+   { bracket, 05-os-syscalls section 3).                                      }
+   Sched_Class(schedErr, false);
+   Info_Process(err, My_ID, pcInfo);     { pcInfo.progpathname = our own file }
+   Sched_Class(schedErr, true);
+
+   { (5) THE TOOL-NUMBER-INDEPENDENT PREFIX (03-app-template section 5.5t).   }
+   { Our executable is installed as "<stem>-{TNN}Obj", so our own pathname    }
+   { already contains our tool number.  Keep everything through the closing   }
+   { brace: "<stem>-{TNN}".  The phrase file and the data segment both hang   }
+   { off this prefix, so renaming the installed file to a different number    }
+   { and re-running InstallTool renumbers the tool with ZERO source changes.  }
+   { (The shipped apps instead paste a literal '-{t12}' back on --            }
+   { APHP-HP.TEXT:1971 and :2102 -- which is exactly why renumbering them     }
+   { takes a rebuild.  Do not copy that.)                                     }
+   cutAt := pos('}', pcInfo.progpathname);
+   if (cutAt = 0) or (cutAt > 40) then begin
+      { No brace: we are not running as an installed tool (someone ran the    }
+      { bare executable).  Over 40: the prefix cannot fit the TParamAlert     }
+      { (string[40]) that InitMP takes -- pathologically deep folder, give    }
+      { up rather than truncate to a wrong name.                              }
+      TellFiler(0, initFailed, internalError, nil);
+      halt
+   end;
+   myPrefix := copy(pcInfo.progpathname, 1, cutAt);
+
+   { (6) Menus + alerts, one call: InitMP opens "<myPrefix>PHRASE" (it        }
+   { appends 'PHRASE' itself), installs each menu block into myMenus[], then  }
+   { sizes the alert cache from the numbers stamped in the file and loads     }
+   { the alert directory (06-lib-am initMP).  err > 0 is fatal (3082 heap     }
+   { full, 3083 bad menu map, or an OS open error); negative would be the     }
+   { version warning, which InitMP folds away itself.                         }
+   InitMP(theHeap,                       { our heap, from step 3 }
+          myPrefix,                      { ...PHRASE gets appended }
+          @AlertFailed,                  { errProc: display failures - step (1) of 10.3 }
+          alertVerNum,                   { expected phrase-file version }
+          @myMenus[mFile],               { where menu blocks land (slot 1 first) }
+          allAlerts,                     { OUT: the token every alert call takes }
+          err);
+   if err > 0 then begin
+      TellFiler(err, initFailed, noMemory, nil);
+      halt
+   end;
+
+   { (7) The Field Editor and the four dialog fields.  After InitMP because   }
+   { the word-triples string is a phrase; after InitHeap because fields live  }
+   { in theHeap.  (MSDialog.InitDialogs; 06-lib-fe FEInit.)                   }
+   InitDialogs(feErr);
+   if feErr <> 0 then begin
+      TellFiler(feErr, initFailed, noMemory, nil);
+      halt
+   end;
+
+   { (8) Cursors.  InitWmlCrs loads the standard cursor shapes from the       }
+   { system cursor font -- it touches disk and can fail (06-lib-sb).  NOTE    }
+   { what is missing here: no InitWmlSb, no sbCreate, no grow-box setup.      }
+   { This window has no scroll bars and no grow box -- it is exactly as big   }
+   { as the board -- so the scroll-bar library is never initialised at all.   }
+   InitWmlCrs(err);
+   if err <> 0 then begin
+      TellFiler(err, initFailed, noDiskSpace, nil);
+      halt
+   end;
+
+   { (9) A guaranteed-valid current port before any drawing can happen.       }
+   { deskPort is the WM's always-valid desktop port (06-lib-wm-a section 4;   }
+   { cf. APHP-HP.TEXT:2074).                                                  }
+   SetPort(deskPort);
+
+   { (10) The document data segment: open it if it exists (state from last    }
+   { time), create it fresh if not.  All the OS calls sit inside              }
+   { Sched_Class(false)/(true) brackets because each can block on disk        }
+   { (05-os-syscalls; 03-app-template section 5.1).                           }
+   dsPath := concat(myPrefix, 'data segment');
+   { -> "<stem>-{TNN}data segment", matching the Calculator's naming          }
+   {    ('-{t12}data segment') but with the number coming from OUR path.      }
+
+   useDefaults := false;
+   Sched_Class(schedErr, false);
+   Open_DataSeg(err, dsPath, segRefNum, segPtr, segLDSN);
+   if (err <> 0) and (err <> -321) and (err <> -320) then begin
+      { A real failure (usually 313, no such segment: first launch ever).     }
+      { -321/-320 are WARNINGS -- "left open across a crash" / "size          }
+      { derived" -- where the segment opened and the data is probably fine;   }
+      { the version stamp below arbitrates (05-os-syscalls 1.6).              }
+      Close_DataSeg(junkErr, segRefNum); { harmless if nothing opened; junkErr }
+      Kill_Object(junkErr, dsPath);      { because these are best-effort and   }
+                                         { must not clobber the result we test }
+      Make_DataSeg(err, dsPath, sizeof(MSDoc), sizeof(MSDoc),
+                   segRefNum, segPtr, segLDSN, ds_shared);
+      useDefaults := true                { brand-new segment: fill defaults later }
+   end;
+   SetAccess_DataSeg(junkErr, segRefNum, false);
+   { false = read/write: make sure we can write the document whatever state   }
+   { the segment was reopened in -- the Calculator's defensive move           }
+   { (APHP-HP.TEXT:2135; 05-os-syscalls setaccess_dataseg).                   }
+   Sched_Class(schedErr, true);
+   if err > 0 then begin
+      { STRICTLY POSITIVE: a genuine failure from whichever call set err      }
+      { last (the open on the reuse path, the make on the create path).       }
+      { Negative values are the -321/-320 open WARNINGS, which mean the       }
+      { segment is usable -- testing 'err <> 0' here would wrongly abort a    }
+      { perfectly recoverable relaunch after a crash.                         }
+      TellFiler(err, initFailed, noDiskSpace, nil);
+      halt
+   end;
+
+   myDoc := pointer(segPtr);             { the segment, seen as our document }
+
+   { (11) Trust check on restored contents.  After a crash (-321) or an       }
+   { upgrade, the bytes may not be a valid MSDoc.  The version       }
+   { stamp is the arbiter -- exactly the Calculator's stale-stamp fallback.   }
+   { We reuse the segment in place (its size is right for this build or we    }
+   { just made it): reset the contents, not the file.                         }
+   if useDefaults or (myDoc^.version <> msDocVersion) then begin
+      useDefaults := true;
+      { InitNewDoc does the actual default-filling when the window arrives;   }
+      { stamp enough here that a crash BEFORE fcNone leaves it consistent.    }
+      myDoc^.version := msDocVersion;
+      for lv := lvBeginner to lvExpert do begin
+         myDoc^.bestTime[lv] := noBest;
+         myDoc^.bestName[lv] := ''
+      end
+   end;
+
+   initing := false                      { alert failures are survivable now }
+end;
+
+
+{==============================================================================}
+{  The main program block -- structurally UNCHANGED from 03-app-template      }
+{  section 4 (the two-phase loop is the heart of every LOS app; do not        }
+{  improvise on it).  The one addition the template explicitly provides for:  }
+{  the Phase-B idle branch does the timer work before yielding, the Clock's   }
+{  pattern (03-app-template section 11).                                      }
+{==============================================================================}
+
+begin { main program }
+
+   InitGraf(@thePort);      { (1) QuickDraw for THIS process -- every process }
+                            { that draws must, before any other graphics      }
+                            { call.  @thePort locates the QD globals block    }
+                            { (06-lib-qd-a InitGraf).                         }
+
+   OpenWm;                  { (2) Attach to the Window Manager: maps the      }
+                            { shared WMDATA segment into our address space    }
+                            { and registers us as a window process.  Until    }
+                            { this, no window/event/menu call is valid        }
+                            { (06-lib-wm-a OpenWM).                           }
+
+   Initialize;              { (3) Everything above.  On any failure it has    }
+                            { already told the Filer and halted.              }
+
+   repeat                   { (4) THE MAIN PROGRAM LOOP -- two phases.        }
+
+      { Phase A: we are NOT the active window.  Nothing to do but wait:       }
+      { GetEvent blocks and may suspend the process entirely until an event   }
+      { addressed to us arrives (a folderActivate, a filerEvent...).  A       }
+      { background Minesweeper costs zero CPU -- and its timer deliberately   }
+      { does not tick here; see UpdateTimer.                                  }
+      while not (ImActive or toldToDie) do begin
+         GetEvent(theEvent);             { may suspend us - 06-lib-wm-a }
+         ProcessTheEvent
+      end;
+
+      { Phase B: we ARE the active window.  Stay responsive: poll, and when   }
+      { idle do the periodic work THEN yield.  LetOthersRun is not manners    }
+      { -- a Phase-B loop that spins without it starves the Filer and every   }
+      { other process (cooperative multitasking, 01-orientation 2.3).         }
+      while ImActive and (not toldToDie) do begin
+         if EventAvail then begin
+            GetEvent(theEvent);
+            ProcessTheEvent
+         end
+         else begin
+            UpdateTimer;                 { redraw only when the second rolls  }
+                                         { over -- cheap by construction      }
+            LetOthersRun                 { NEVER omitted }
+         end
+      end;
+
+   until toldToDie;         { (5) Only fcTerminate sets this.  Falling off    }
+                            { the end runs the program's normal exit, which   }
+                            { fires SYS_TERMINATE -> LastWishes -> ImDying.   }
+end.

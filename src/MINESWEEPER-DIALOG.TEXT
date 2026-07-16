@@ -1,0 +1,1084 @@
+{==============================================================================}
+{                                                                              }
+{  MINESWEEPER-DIALOG.TEXT  --  unit MSDialog                                  }
+{                                                                              }
+{  The two Field Editor dialogs:                                               }
+{                                                                              }
+{    DoCustomDialog  -- "Custom Level ...": three numeric fields (width,       }
+{                       height, mines), validated against the limits in       }
+{                       MSGlobals; a bad value raises alert 50 and bounces    }
+{                       the caret back onto the offending field.              }
+{    DoNameDialog    -- "New record": one text field for the winner's name.   }
+{                                                                              }
+{  LOS has no dialog manager an application can call (the dialog band at the  }
+{  top of the screen belongs to the Alert Manager).  A native app that wants  }
+{  an input form does what LisaList's forms and the Calculator's entry line   }
+{  do: it draws the form INSIDE ITS OWN WINDOW and drives the Field Editor    }
+{  (LIBFE) by hand.  This unit is a worked example of the complete FE call    }
+{  cycle from 06-lib-fe section 4:                                            }
+{                                                                              }
+{     FEInit (once, at startup)                        - InitDialogs          }
+{     CreateField per box                              - InitDialogs          }
+{     SelectAll on keyboard entry / Select + GrowSel + StartBlink on mouse    }
+{     CaretOn + InsCh / Backspace per keystroke; DrawField to repaint         }
+{     BlinkCaret when the blink timeout fires (WE run the timer: the FE       }
+{        only hands back the next interval in a VAR t)                        }
+{     UpdateRun / CutCopyField / PasteField / UndoEdit from the Edit menu     }
+{     ExitField when focus leaves; FETerminate at shutdown (in LastWishes)    }
+{                                                                              }
+{  THE THREE FE TRAPS, all of which this unit must respect (06-lib-fe):       }
+{   1. "Handles must be re-dereferenced after this call" on most FE           }
+{      routines: fldHeap blocks move.  We therefore NEVER hold a              }
+{      dereferenced field/fieldState pointer across an FE call -- every       }
+{      access below goes hf^^.field fresh off the handle.                     }
+{   2. There is no GetFieldValue.  FieldText below reads hf^^.curValue /      }
+{      hf^^.curLen out of the record directly (after ExitField has packed     }
+{      the characters).                                                       }
+{   3. FEInit needs a "triples" word-classification string.  The Calculator   }
+{      smuggles it in as a menu item (APHP-HP.TEXT:2005); we keep it as a     }
+{      "get" phrase (number-only entry) in the phrase file, fetched with      }
+{      GetAlert -- same idea, less contortion.                                }
+{                                                                              }
+{  MODALITY.  Each dialog runs a NESTED event loop, structured exactly like   }
+{  the main loop's Phase A / Phase B pair (03-app-template section 4): while  }
+{  the dialog is up, this loop is the one pumping GetEvent, and it must       }
+{  honour the same obligations -- answer activate/deactivate handshakes,     }
+{  service updates, NEVER spin without LetOthersRun, and answer Filer         }
+{  commands (via MSGlobals' HandleFilerOp; an unanswered Filer op freezes     }
+{  the whole desktop, 01-orientation 7.3).  While the dialog is up the File/  }
+{  Game/Level menus are disabled and the Edit menu comes alive -- the Edit    }
+{  menu exists FOR the dialogs (its items act on the focused field), so it    }
+{  is gray the rest of the time (cf. the Calculator's ChkEditMenu,            }
+{  APHP-HP.TEXT:757).                                                          }
+{                                                                              }
+{==============================================================================}
+
+unit MSDialog;
+
+{$R-}
+{ Range checking OFF for this unit, deliberately.  The Field Editor's value   }
+{ array is declared 'data = array [0..0] of byte' (unit dbenv) -- the         }
+{ open-array idiom -- and reading character i means indexing element i of an  }
+{ array whose DECLARED bound is 0.  With {$R+} that is a runtime range fault; }
+{ every shipped app that touches such structures compiles its production      }
+{ build with range checks off (cf. the Calculator's RangeChk conditional,     }
+{ APHP-HP.TEXT:37).  The other Minesweeper units keep the default {$R+},      }
+{ where the checks catch real mistakes.                                       }
+
+INTERFACE
+
+uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-lib-sm   }
+     (*$U UnitHz.obj *)         UnitHz,      { THz                       - 06-lib-sm   }
+     (*$U Storage.obj *)        Storage,     { theHeap, NewHandle        - 06-lib-qd-b }
+     (*$U QuickDraw.obj *)      QuickDraw,   { drawing, Str255           - 06-lib-qd-a }
+     (*$U Fontmgr.obj *)        FontMgr,     { font numbers              - 06-lib-fm   }
+     (*$U dbenv.obj *)          dbenv,       { byte / data / hndData -- the open-array }
+                                             { types FEDec builds on (the Calculator   }
+                                             { links it for the same reason)           }
+     (*$U FEdec.obj *)          FEdec,       { field, fieldState, hndField ... - 06-lib-fe }
+     (*$U fld.obj *)            fieldedit,   { the Field Editor engine.  NOTE: unit    }
+                                             { name 'fieldedit', object file 'fld.obj' }
+                                             { -- unit and file names differ           }
+                                             { (02-workshop-build 5.2)                 }
+     (*$U libos/SysCall.obj *)  SysCall,     { (via MSGlobals)           - 05-os-syscalls }
+     (*$U wm.events.obj *)      Events,      { GetEvent, Time, clickDelay - 06-lib-wm-a }
+     (*$U wm.folders.obj *)     Folders,     { TakeControl, BeginUpdate  - 06-lib-wm-a }
+     (*$U wm.menus.obj *)       Menus,       { MenuSelect, EnableMenu    - 06-lib-wm-b }
+     (*$U AlertMgr.obj *)       AlertMgr,    { GetAlert, GetButn, StopAlert - 06-lib-am }
+     (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
+     (*$U WMlCrs.obj *)         WMLCrs,      { cursor decls              - 06-lib-sb   }
+     (*$U FilerComm.obj *)      FilerComm,   { HandleFilerOp's types     - 06-lib-fc   }
+     (*$U MINESWEEPER-GLOBALS.OBJ *) MSGlobals,
+     (*$U MINESWEEPER-DRAW.OBJ *)    MSDraw; { DrawContents, for repainting the window }
+                                             { under the panel on update events        }
+
+
+{ InitDialogs -- one-time Field Editor bring-up: FEInit with the word-triples }
+{ phrase, one field per dialog box, one shared fieldState.  Call from         }
+{ Initialize AFTER InitMP (the triples come from the phrase file) and after   }
+{ InitHeap (the FE allocates from theHeap).  err <> 0 means the FE could not  }
+{ allocate; Initialize treats that as fatal (TellFiler initFailed + halt).    }
+procedure InitDialogs (var err : integer);
+
+{ DoCustomDialog -- run the Custom Level dialog, seeded with the remembered   }
+{ myDoc^.customW/H/M.  True = the player confirmed; w/h/m return validated    }
+{ values (also written back to customW/H/M).  False = cancelled (Clear key,   }
+{ Cancel button, or the Filer closed us mid-dialog).                          }
+function DoCustomDialog (var w, h, m : integer) : boolean;
+
+{ DoNameDialog -- run the new-record name prompt.  True = confirmed, with    }
+{ the (possibly empty) name in winnerName; false = cancelled, and the caller  }
+{ records no best time -- declining the prompt declines the record.          }
+function DoNameDialog (var winnerName : Str255) : boolean;
+
+
+IMPLEMENTATION
+
+const
+   numFldLen  = 3;      { a numeric field holds at most 3 digits (values <= 999)  }
+   nameFldLen = 20;     { names are capped so the Best Times alert line stays short }
+
+   { Panel geometry.  The panel must fit inside the SMALLEST window we ever    }
+   { show it in -- Beginner is 205 x 190 content (2*8 + 9*21 = 205 wide,      }
+   { 56 + 9*14 + 8 = 190 tall; constants in MSGlobals) -- so 190 x 150 fits   }
+   { with room to spare, centered.                                            }
+   cusPanW  = 190;    { the Custom Level panel  }
+   cusPanH  = 150;
+   namPanW  = 190;    { the record-name panel   }
+   namPanH  = 104;
+
+   rowH    = 26;        { vertical pitch of the three label+field rows }
+   fBoxH   = 18;        { the framed box around a field    }
+   numBoxW = 46;        { box width for a 3-digit field    }
+   namBoxW = 158;       { box width for the name field     }
+   btnW    = 62;        { OK / Cancel buttons: 62 x 18     }
+   btnH    = 18;
+
+var
+   { The four fields (created once, reused for the life of the process) and   }
+   { the ONE shared editing state.  Only one field can have the caret at a    }
+   { time, so a single fieldState suffices: entering a field initialises it   }
+   { (SelectAll / InitFState) and leaving packs it back (ExitField) -- the    }
+   { same economy the Calculator uses with its single entry field.            }
+   fldW, fldH, fldM : hndField;      { Custom: width / height / mines }
+   fldName          : hndField;      { record dialog: the name        }
+   dlgFSH           : hndFState;     { the shared transient editing state }
+
+   curFld    : hndField;             { field owning the caret; nil = none }
+   blinkT    : integer;              { current caret half-period from the FE     }
+                                     { (hundredths); <= 0 means "do not blink"   }
+   nextBlink : longint;              { Time value when BlinkCaret is next due    }
+
+   panelR    : Rect;                 { the panel now on screen }
+   isCustom  : boolean;              { which dialog is up (drives DrawPanel) }
+   okR, cancelR : Rect;              { the two buttons }
+
+   lastFldTime : longint;            { double-click detection inside fields:   }
+   lastFldHnd  : hndField;           { previous click's time and field, so a   }
+                                     { second click within clickDelay becomes  }
+                                     { SelectWord (06-lib-wm-a clickDelay)     }
+
+
+{==============================================================================}
+{  Small helpers                                                               }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+{  GetPhrase -- fetch a "get" phrase (dialog label / title) from the phrase    }
+{  file.  GetAlert copies the text into a caller buffer through a ^Str255     }
+{  (06-lib-am GetAlert); this wrapper hides the pointer fiddling.             }
+{------------------------------------------------------------------------------}
+
+procedure GetPhrase (n : integer; var s : Str255);
+begin
+   s := '';
+   GetAlert(allAlerts, n, @s)
+end;
+
+{------------------------------------------------------------------------------}
+{  FieldText -- trap 2 from the header: there is no GetFieldValue, so read    }
+{  the characters straight out of the field record.  PRECONDITION: the field  }
+{  is not being edited (ExitField has run), so the characters are packed at   }
+{  the start of curValue and curLen counts them (06-lib-fe, ExitField).       }
+{------------------------------------------------------------------------------}
+
+procedure FieldText (hf : hndField; var s : Str255);
+var i, len, b : integer;
+begin
+   len := hf^^.curLen;                    { fresh double-dereference -- trap 1 }
+   if len > 255 then len := 255;          { a Str255 physically cannot hold more }
+   s := '';
+   s[0] := chr(len);                      { set the length byte directly, then   }
+                                          { fill; the standard Pascal-string     }
+                                          { building idiom                       }
+   for i := 1 to len do begin
+      b := hf^^.curValue^^[i - 1];        { dbenv's byte is SIGNED (-128..127):  }
+      if b < 0 then b := b + 256;         { fold high-bit (Mac Roman) characters }
+      s[i] := chr(b)                      { back to 0..255 before chr            }
+   end
+end;
+
+{------------------------------------------------------------------------------}
+{  TextToInt -- digits-only string to integer.  False for empty, non-digit,   }
+{  or over-long input.  Fields are capped at 3 characters so no overflow      }
+{  test is needed (999 max).                                                   }
+{------------------------------------------------------------------------------}
+
+function TextToInt (var s : Str255; var n : integer) : boolean;
+var i : integer;
+begin
+   TextToInt := false;
+   n := 0;
+   if (length(s) < 1) or (length(s) > numFldLen) then exit(TextToInt);
+   for i := 1 to length(s) do begin
+      if (s[i] < '0') or (s[i] > '9') then exit(TextToInt);
+      n := n * 10 + (ord(s[i]) - ord('0'))
+   end;
+   TextToInt := true
+end;
+
+{------------------------------------------------------------------------------}
+{  IntToText -- integer (0..999) to its decimal string, no leading zeros.     }
+{------------------------------------------------------------------------------}
+
+procedure IntToText (n : integer; var s : Str255);
+begin
+   s := '';
+   if n >= 100 then s := concat(s, ' ');           { reserve, then overwrite -- }
+   if n >= 10  then s := concat(s, ' ');           { builds the right length    }
+   s := concat(s, ' ');
+   if n >= 100 then s[length(s) - 2] := chr(ord('0') + n div 100);
+   if n >= 10  then s[length(s) - 1] := chr(ord('0') + (n div 10) mod 10);
+   s[length(s)] := chr(ord('0') + n mod 10)
+end;
+
+{------------------------------------------------------------------------------}
+{  StuffField -- put a value into a field that is NOT being edited.  Used to  }
+{  seed the Custom fields with the remembered defaults.  ClearField empties   }
+{  the record through the official door (hfs = nil is allowed, 06-lib-fe);    }
+{  the characters are then written into curValue directly -- the same packed  }
+{  layout ExitField leaves and DrawField(hf, nil, ...) expects for a static   }
+{  field.  (The alternative -- focus the field and InsCh each digit -- drags  }
+{  the whole selection machinery in just to preload three digits.)            }
+{------------------------------------------------------------------------------}
+
+procedure StuffField (hf : hndField; var s : Str255);
+var i, ferr : integer;
+begin
+   ClearField(hf, nil, ferr);             { curLen := 0, one run kept - 06-lib-fe }
+   { ClearField may move heap blocks (undo snapshot); re-dereference after.   }
+   hf^^.curLen := length(s);              { <= the field's maxLen by construction }
+   for i := 1 to length(s) do
+      hf^^.curValue^^[i - 1] := ord(s[i])
+end;
+
+{------------------------------------------------------------------------------}
+{  Focus management                                                            }
+{------------------------------------------------------------------------------}
+
+{ DropFocus -- take the caret away and pack the field (ExitField).  Safe to   }
+{ call when nothing has focus.  After this, FieldText may be used on the      }
+{ field.                                                                       }
+
+procedure DropFocus;
+begin
+   if curFld <> nil then begin
+      SetPort(myWindow);
+      ClipRect(myWindow^.portRect);
+      ExitField(curFld, dlgFSH);          { turn off highlight, close the gap,  }
+                                          { pack chars left - 06-lib-fe         }
+      DrawField(curFld, nil, false, true);{ repaint without selection           }
+      curFld := nil;
+      blinkT := -1                        { nothing to blink }
+   end
+end;
+
+{ SetFocusAll -- give the caret to a field, whole-contents selected (the      }
+{ keyboard way in: Tab, or programmatic).  SelectAll initialises the shared   }
+{ fieldState AND highlights AND returns the first blink timeout (06-lib-fe).  }
+
+procedure SetFocusAll (hf : hndField);
+begin
+   DropFocus;
+   SetPort(myWindow);
+   ClipRect(myWindow^.portRect);
+   curFld := hf;
+   SelectAll(curFld, dlgFSH, blinkT);
+   if blinkT > 0 then nextBlink := Time + blinkT   { arm OUR blink timer: the FE }
+                                                   { never runs one itself       }
+end;
+
+{==============================================================================}
+{  Panel layout and drawing                                                    }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+{  LayoutPanel -- position the panel (centered in the current content area)   }
+{  and push each field's coords into the FE (SetFCoords resets its display    }
+{  state so the next DrawField paints correctly, 06-lib-fe).                  }
+{------------------------------------------------------------------------------}
+
+procedure LayoutPanel;
+var pw, ph : integer;
+    box    : Rect;
+
+   procedure OneRow (rowIx : integer; hf : hndField; boxW : integer);
+   { Compute row rowIx's field box (right-aligned in the panel) and bind the  }
+   { field to its interior.                                                   }
+   var fb : Rect;
+   begin
+      SetRect(fb, panelR.right - 16 - boxW,
+                  panelR.top + 30 + rowIx * rowH,
+                  panelR.right - 16,
+                  panelR.top + 30 + rowIx * rowH + fBoxH);
+      { The FIELD lives inside the framed box, inset so the caret and the     }
+      { frame never collide.                                                  }
+      box := fb;
+      InsetRect(box, 3, 2);
+      SetFCoords(hf, nil, box)            { nil state: not being edited now }
+   end;
+
+begin
+   if isCustom then begin pw := cusPanW; ph := cusPanH end
+               else begin pw := namPanW; ph := namPanH end;
+
+   SetRect(panelR, (contentW - pw) div 2,
+                   (contentH - ph) div 2,
+                   (contentW - pw) div 2 + pw,
+                   (contentH - ph) div 2 + ph);
+
+   if isCustom then begin
+      OneRow(0, fldW, numBoxW);
+      OneRow(1, fldH, numBoxW);
+      OneRow(2, fldM, numBoxW)
+   end
+   else
+      OneRow(0, fldName, namBoxW);
+
+   { The buttons: Cancel lower-left, OK (the default) lower-right.            }
+   SetRect(cancelR, panelR.left + 14, panelR.bottom - btnH - 10,
+                    panelR.left + 14 + btnW, panelR.bottom - 10);
+   SetRect(okR, panelR.right - btnW - 14, panelR.bottom - btnH - 10,
+                panelR.right - 14, panelR.bottom - 10)
+end;
+
+{------------------------------------------------------------------------------}
+{  DrawPanel -- paint the whole dialog panel.  Called on open and from the    }
+{  update handler (after DrawContents has repainted the window beneath).      }
+{------------------------------------------------------------------------------}
+
+procedure DrawPanel;
+var s     : Str255;
+    fi    : FontInfo;
+    inner : Rect;
+    y     : integer;
+
+   procedure FieldBoxAround (hf : hndField);
+   { Frame the box around a field: the field's own coords, un-inset.          }
+   var fb : Rect;
+   begin
+      fb := hf^^.coords;                  { fresh dereference (trap 1)         }
+      InsetRect(fb, -3, -2);              { undo LayoutPanel's inset            }
+      PenNormal;
+      FrameRect(fb)
+   end;
+
+   procedure LabelForRow (rowIx : integer; phrase : integer);
+   { A row's label, from its phrase, baseline-aligned with the field text.    }
+   var ls : Str255;
+   begin
+      GetPhrase(phrase, ls);
+      MoveTo(panelR.left + 14,
+             panelR.top + 30 + rowIx * rowH + fBoxH - 5);
+      DrawString(ls)
+   end;
+
+   procedure OneButton (var r : Rect; capIx : integer; isDefault : boolean);
+   { A rounded button with its caption from the Alert Manager's own button    }
+   { table (GetButn: index 0 = Cancel, 1 = OK -- the same localized strings   }
+   { the phrase file defines for alerts, 06-lib-am).  The default button      }
+   { wears a second, outer frame, like an alert's default (ShowButn draws a   }
+   { thick border for its default; two concentric frames is our 1-bit          }
+   { equivalent).                                                              }
+   var cap : Str255;
+       big : Rect;
+   begin
+      cap := '';
+      GetButn(capIx, @cap);
+      EraseRoundRect(r, 9, 6);
+      PenNormal;
+      FrameRoundRect(r, 9, 6);            { 9 x 6 corner ovals: 3:2, round on glass }
+      if isDefault then begin
+         big := r;
+         InsetRect(big, -3, -2);          { the outer "default" ring, 3:2 offset too }
+         FrameRoundRect(big, 12, 8)
+      end;
+      MoveTo((r.left + r.right - StringWidth(cap)) div 2,
+             (r.top + r.bottom + fi.ascent - fi.descent) div 2);
+      DrawString(cap)
+   end;
+
+begin
+   SetPort(myWindow);
+   ClipRect(myWindow^.portRect);
+
+   TextFont(fntLabel);
+   TextFace([]);
+   GetFontInfo(fi);
+
+   { The plate: white, double-framed so it reads as a layer ABOVE the board.  }
+   EraseRect(panelR);
+   PenNormal;
+   FrameRect(panelR);
+   inner := panelR;
+   InsetRect(inner, 2, 2);
+   FrameRect(inner);
+
+   { Title, centered, bold.                                                   }
+   if isCustom then GetPhrase(phCustomTitle, s)
+               else GetPhrase(phNameTitle, s);
+   TextFace([bold]);
+   y := panelR.top + 8 + fi.ascent;
+   MoveTo((panelR.left + panelR.right - StringWidth(s)) div 2, y);
+   DrawString(s);
+   TextFace([]);
+
+   if isCustom then begin
+      LabelForRow(0, phWidth);
+      LabelForRow(1, phHeight);
+      LabelForRow(2, phMines);
+      FieldBoxAround(fldW);
+      FieldBoxAround(fldH);
+      FieldBoxAround(fldM);
+      { Repaint each field's text; the focused one with its selection.        }
+      if curFld = fldW then DrawField(fldW, dlgFSH, true, true)
+                       else DrawField(fldW, nil, false, true);
+      if curFld = fldH then DrawField(fldH, dlgFSH, true, true)
+                       else DrawField(fldH, nil, false, true);
+      if curFld = fldM then DrawField(fldM, dlgFSH, true, true)
+                       else DrawField(fldM, nil, false, true)
+   end
+   else begin
+      FieldBoxAround(fldName);
+      if curFld = fldName then DrawField(fldName, dlgFSH, true, true)
+                          else DrawField(fldName, nil, false, true)
+   end;
+
+   OneButton(cancelR, 0, false);          { button 0 is ALWAYS Cancel - 06-lib-am }
+   OneButton(okR, 1, true)                { button 1 is ALWAYS OK              }
+end;
+
+{==============================================================================}
+{  Menu handling while a dialog is up                                          }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+{  SetDlgMenuState -- flip the menu bar between "dialog" and "normal".        }
+{  While the dialog is up: File/Game/Level are disabled whole (their          }
+{  commands would fight the modal state) and the four Edit items come alive.  }
+{  On close the caller (RunDialog) restores the normal state.  The MAIN       }
+{  program's menu refresher performs the inverse setup at activate time.      }
+{------------------------------------------------------------------------------}
+
+procedure SetDlgMenuState (dialogUp : boolean);
+begin
+   if dialogUp then begin
+      DisableMenu(myMenus[mFile]);        { title dims, items unreachable - 06-lib-wm-b }
+      DisableMenu(myMenus[mGame]);
+      DisableMenu(myMenus[mLevel]);
+      EnableMenu(myMenus[mEdit]);
+      EnableItem(myMenus[mEdit], miUndo);
+      EnableItem(myMenus[mEdit], miCut);
+      EnableItem(myMenus[mEdit], miCopy);
+      EnableItem(myMenus[mEdit], miPaste)
+   end
+   else begin
+      EnableMenu(myMenus[mFile]);
+      EnableMenu(myMenus[mGame]);
+      EnableMenu(myMenus[mLevel]);
+      DisableItem(myMenus[mEdit], miUndo);   { the Edit menu sleeps again: it }
+      DisableItem(myMenus[mEdit], miCut);    { only ever acts on a field      }
+      DisableItem(myMenus[mEdit], miCopy);
+      DisableItem(myMenus[mEdit], miPaste)
+   end;
+   DrawMenuBar                            { repaint the (dimmed) titles; no-op }
+                                          { unless we are active - 06-lib-wm-b }
+end;
+
+{------------------------------------------------------------------------------}
+{  PutUpDlgMenus -- rebuild the menu bar after TakeControl during a dialog.   }
+{  The bar is ours only while active and TakeControl clears it, so every      }
+{  folderActivate must re-insert (03-app-template section 8.1).  This is the  }
+{  dialog-time twin of the main program's PutUpMenus, plus the dialog gray    }
+{  state.                                                                      }
+{------------------------------------------------------------------------------}
+
+procedure PutUpDlgMenus;
+var mm : integer;
+begin
+   ClearMenuBar;
+   for mm := mFile to lastMenu do
+      InsertMenu(myMenus[mm], 0);         { 0 = append at the right - 06-lib-wm-b }
+   SetDlgMenuState(true)                  { ends with DrawMenuBar }
+end;
+
+{------------------------------------------------------------------------------}
+{  DoDlgEditCommand -- an Edit-menu command aimed at the focused field.       }
+{  Every one of these can move heap blocks (trap 1) and leaves the field      }
+{  needing a repaint, hence the unconditional DrawField after.                }
+{------------------------------------------------------------------------------}
+
+procedure DoDlgEditCommand (item : integer);
+var ferr : integer;
+    limit : integer;
+begin
+   if curFld = nil then exit(DoDlgEditCommand);
+   SetPort(myWindow);
+   ClipRect(myWindow^.portRect);
+
+   case item of
+      miUndo  : UndoEdit(curFld, dlgFSH, ferr);       { one-deep, global undo - 06-lib-fe }
+      miCut   : CutCopyField(curFld, dlgFSH, true, true, ferr);
+      miCopy  : CutCopyField(curFld, dlgFSH, false, true, ferr);
+      miPaste : begin
+                   limit := curFld^^.maxLen;          { paste at most what fits }
+                   PasteField(curFld, dlgFSH, ferr, false, limit)
+                   { pasteFmt = false: plain text only; a pasted style run     }
+                   { would be meaningless in a 3-digit box.  A paste can       }
+                   { smuggle non-digits into a numeric field -- harmless,      }
+                   { because OK-time validation (alert 50) catches anything    }
+                   { that is not a clean number.                               }
+                end;
+      otherwise ferr := 0                             { separators can't arrive }
+   end;
+
+   if ferr <> 0 then BeepAlert(1);        { soft beep: nullSelect, fldFull ... - 06-lib-am }
+   DrawField(curFld, dlgFSH, true, true)  { repaint with selection; handles moved (trap 1) }
+end;
+
+{==============================================================================}
+{  The modal loop                                                              }
+{==============================================================================}
+
+var                                       { RunDialog <-> event-handler couplers }
+   dlgDone     : boolean;                 { loop-exit flag        }
+   dlgAccepted : boolean;                 { true = OK, false = Cancel }
+
+{------------------------------------------------------------------------------}
+{  TrackDlgButton -- press feedback and release test for OK / Cancel.  Invert }
+{  while the button is held, act only if the mouse is released inside -- the  }
+{  standard escape hatch (roll off to change your mind).  StillDown is the    }
+{  correct hold test: it goes false as soon as a release is QUEUED, unlike    }
+{  Button (06-lib-wm-a StillDown).                                            }
+{------------------------------------------------------------------------------}
+
+function TrackDlgButton (var r : Rect) : boolean;
+var pt : Point;
+begin
+   SetPort(myWindow);
+   InvertRoundRect(r, 9, 6);
+   while StillDown do
+      LetOthersRun;                       { NEVER spin without yielding -- even }
+                                          { a button press must not starve the }
+                                          { Filer (01-orientation 2.3)         }
+   InvertRoundRect(r, 9, 6);
+   GetMouse(pt);                          { local coords of the current port - 06-lib-wm-a }
+   TrackDlgButton := PtInRect(pt, r)
+end;
+
+{------------------------------------------------------------------------------}
+{  FieldFromPoint -- which visible field, if any, contains the point.  The    }
+{  hit zone is the framed box, a little larger than the text coords, so a    }
+{  click on the frame counts.                                                 }
+{------------------------------------------------------------------------------}
+
+function FieldFromPoint (pt : Point) : hndField;
+   function Hit (hf : hndField) : boolean;
+   var fb : Rect;
+   begin
+      fb := hf^^.coords;
+      InsetRect(fb, -3, -2);
+      Hit := PtInRect(pt, fb)
+   end;
+begin
+   FieldFromPoint := nil;
+   if isCustom then begin
+      if Hit(fldW) then FieldFromPoint := fldW
+      else if Hit(fldH) then FieldFromPoint := fldH
+      else if Hit(fldM) then FieldFromPoint := fldM
+   end
+   else
+      if Hit(fldName) then FieldFromPoint := fldName
+end;
+
+{------------------------------------------------------------------------------}
+{  DlgMouseInField -- the full FE mouse protocol on a click inside a field:   }
+{  Select (or SelectWord on a double-click) on the down, GrowSel while the    }
+{  button is held and the mouse leaves the "neighbourhood" rect, StartBlink   }
+{  on the release (06-lib-fe section 4, step 3).                              }
+{------------------------------------------------------------------------------}
+
+procedure DlgMouseInField (hf : hndField; pt : Point);
+var nbr    : Rect;
+    mpt    : Point;
+    isDbl  : boolean;
+begin
+   SetPort(myWindow);
+   ClipRect(myWindow^.portRect);
+
+   { Double-click = second click on the SAME field within clickDelay          }
+   { (hundredths, same clock as theEvent.when -- 06-lib-wm-a).                }
+   isDbl := (hf = lastFldHnd) and
+            (theEvent.when - lastFldTime < clickDelay);
+   lastFldHnd := hf;
+   lastFldTime := theEvent.when;
+
+   if hf <> curFld then begin
+      { Focus moves by mouse: pack the old field, initialise the shared state }
+      { for the new one (InitFState = "begin editing without selecting"),     }
+      { then let Select place the caret at the click.                         }
+      DropFocus;
+      curFld := hf;
+      InitFState(curFld, dlgFSH);         { 06-lib-fe InitFState }
+      DrawField(curFld, dlgFSH, false, true);   { validate the display image   }
+      isDbl := false                      { first click in a field is never a double }
+   end
+   else
+      { Re-click in the focused field: Select requires the previous highlight }
+      { to be off first (its stated precondition).                            }
+      HilightSel(curFld, dlgFSH, false);
+
+   if isDbl then
+      SelectWord(pt, curFld, dlgFSH, nbr, blinkT)   { word selection - 06-lib-fe }
+   else
+      Select(pt, curFld, dlgFSH, nbr, blinkT);      { caret at the click; blinkT }
+                                                    { comes back -1: frozen      }
+                                                    { while the button is down   }
+
+   { Drag: extend the selection whenever the mouse leaves the neighbourhood   }
+   { rect the FE gave us (it is the "no change needed within here" zone).     }
+   while StillDown do begin
+      GetMouse(mpt);
+      if not PtInRect(mpt, nbr) then
+         GrowSel(mpt, curFld, dlgFSH, nbr);
+      LetOthersRun                        { yield even while tracking }
+   end;
+
+   StartBlink(blinkT);                    { re-arm the caret on release - 06-lib-fe }
+   if blinkT > 0 then nextBlink := Time + blinkT
+end;
+
+{------------------------------------------------------------------------------}
+{  NextField -- Tab order: width -> height -> mines -> width...  (The name    }
+{  dialog has one field; Tab just re-selects it.)                             }
+{------------------------------------------------------------------------------}
+
+procedure NextField;
+begin
+   if not isCustom then begin
+      SetFocusAll(fldName);
+      exit(NextField)
+   end;
+   if curFld = fldW then SetFocusAll(fldH)
+   else if curFld = fldH then SetFocusAll(fldM)
+   else SetFocusAll(fldW)
+end;
+
+{------------------------------------------------------------------------------}
+{  ValidateCustom -- OK-time validation of the three numbers.  On the first   }
+{  bad field: raise alert 50 ("^1 is not a valid ^2. It must be a whole       }
+{  number between ^3 and ^4.") and put the caret back on the offender with    }
+{  ErrorSelect -- never silently clamp.  Returns true when all three pass;    }
+{  w/h/m carry the values out.                                                }
+{                                                                              }
+{  The limits (MSGlobals, with the fit arithmetic): width 8..30, height       }
+{  8..18, mines 1..w*h-9.  The -9 is first-click safety: the first click and  }
+{  its 8 neighbours are guaranteed mine-free, so 9 cells can never hold a     }
+{  mine and a fuller board would make PlaceMines impossible.                  }
+{------------------------------------------------------------------------------}
+
+function ValidateCustom (var w, h, m : integer) : boolean;
+
+   function CheckOne (hf : hndField; labelPh : integer;
+                      lo, hi : integer; var v : integer) : boolean;
+   var txt, ls, los, his : Str255;
+       ok : boolean;
+   begin
+      FieldText(hf, txt);                 { the raw characters, packed by ExitField }
+      ok := TextToInt(txt, v);
+      if ok then ok := (v >= lo) and (v <= hi);
+      if not ok then begin
+         { Fill ^1..^4, then show.  ParamAlert covers slots 1..3; slot 4      }
+         { needs the finer-grained ArgAlert (06-lib-am: ParamAlert is         }
+         { literally three ArgAlerts).  Citations must be set BEFORE the      }
+         { StopAlert that draws them.                                         }
+         GetPhrase(labelPh, ls);          { ^2: which field, by its own label }
+         IntToText(lo, los);              { ^3: the low bound  }
+         IntToText(hi, his);              { ^4: the high bound }
+         ParamAlert(txt, ls, los);        { ^1 = the offending text }
+         ArgAlert(4, his);
+         StopAlert(allAlerts, alrtBadValue);
+         { Alert 50 is two-stage ("stop soft; medium alert"): the FIRST       }
+         { offence is only a soft beep, a REPEAT gets the box -- authored     }
+         { that way in the phrase file, no code here (06-lib-am, stages).     }
+
+         { Bounce the caret back onto the bad text, whole value selected,     }
+         { so one keystroke replaces it: ErrorSelect is built for exactly     }
+         { this (06-lib-fe).  Note the InitFState first: SelectAll does its   }
+         { own state initialisation but ErrorSelect does NOT (SelectAll is    }
+         { documented as InitFState + ErrorSelect over the whole field), and  }
+         { the shared state may still describe a DIFFERENT field here --      }
+         { whichever one had the caret when the user hit OK.                  }
+         SetPort(myWindow);
+         ClipRect(myWindow^.portRect);
+         curFld := hf;
+         InitFState(curFld, dlgFSH);
+         ErrorSelect(curFld, dlgFSH, 0, hf^^.curLen, blinkT);
+         if blinkT > 0 then nextBlink := Time + blinkT
+      end;
+      CheckOne := ok
+   end;
+
+begin
+   ValidateCustom := false;
+   DropFocus;                             { pack ALL fields so FieldText is legal }
+
+   if not CheckOne(fldW, phWidth, minCusDim, maxCusCols, w) then
+      exit(ValidateCustom);
+   if not CheckOne(fldH, phHeight, minCusDim, maxCusRows, h) then
+      exit(ValidateCustom);
+   { The mine cap depends on the (now known-good) w and h.                    }
+   if not CheckOne(fldM, phMines, minCusMines, w * h - 9, m) then
+      exit(ValidateCustom);
+
+   ValidateCustom := true
+end;
+
+{------------------------------------------------------------------------------}
+{  DlgProcessEvent -- one event, dispatched.  Structurally a miniature of     }
+{  the main program's ProcessTheEvent (03-app-template section 6): the same   }
+{  cases, with field editing where the game input was.                        }
+{------------------------------------------------------------------------------}
+
+procedure DlgProcessEvent;
+var theMenu, theItem : integer;
+    pt        : Point;
+    hf        : hndField;
+    ferr      : integer;
+    ch        : char;
+    dummyOpen : boolean;     { HandleFilerOp's wantsOpen; meaningless here }
+begin
+   case theEvent.what of
+
+      buttonDown :
+         if theEvent.who = menuFolder then begin
+            { A menu-bar pull.  Only Edit is enabled (SetDlgMenuState);       }
+            { MenuSelect returns 0,0 for anything disabled (06-lib-wm-b).     }
+            MenuSelect(theEvent.where, theMenu, theItem);
+            if (theMenu = mEdit) and (theItem <> 0) then
+               DoDlgEditCommand(theItem);
+            HiLiteMenu(0)                 { un-highlight the title afterwards }
+         end
+         else if theEvent.who = myWindow then begin
+            pt := theEvent.where;         { already window-local (GetEvent converts) }
+            if PtInRect(pt, okR) then begin
+               if TrackDlgButton(okR) then begin
+                  dlgAccepted := true;    { RunDialog validates before ending }
+                  dlgDone := true
+               end
+            end
+            else if PtInRect(pt, cancelR) then begin
+               if TrackDlgButton(cancelR) then begin
+                  dlgAccepted := false;
+                  dlgDone := true
+               end
+            end
+            else begin
+               hf := FieldFromPoint(pt);
+               if hf <> nil then DlgMouseInField(hf, pt)
+               { A click on the dead panel or the board under it: nothing.    }
+               { The dialog is modal; silence is the answer.                  }
+            end
+         end;
+
+      buttonUp :
+         { Releases are consumed inside the tracking loops above (StillDown   }
+         { turns false when the release is queued); the queued buttonUp       }
+         { itself needs no action.                                            }
+         ;
+
+      keyDown :
+         if theEvent.who = myWindow then begin
+            if theEvent.appleKey then begin
+               { Apple-key shortcut: route through MenuKey FIRST, as always   }
+               { (03-app-template section 6).  Only Edit items are enabled,   }
+               { so MenuKey can only return those (Apple-X/C/V).              }
+               MenuKey(theEvent.ascii, theMenu, theItem);
+               if theMenu = mEdit then begin
+                  HiLiteMenu(theMenu);
+                  DoDlgEditCommand(theItem);
+                  HiLiteMenu(0)
+               end
+            end
+            else begin
+               ch := theEvent.ascii;
+               { Auto-repeat (theEvent.repeatKey) is deliberately HONOURED    }
+               { here, unlike in the game window: held-down Backspace in a    }
+               { text field is what every user expects.                       }
+               if ch = chr(13) then begin           { RETURN = the OK button  }
+                  dlgAccepted := true;
+                  dlgDone := true
+               end
+               else if ch = chr(27) then begin      { CLEAR = the Cancel button }
+                  dlgAccepted := false;             { (the Lisa's Clear key     }
+                  dlgDone := true                   { generates ASCII 27; cf.   }
+               end                                  { InstallTool's GetYN)      }
+               else if ch = chr(9) then             { TAB = next field }
+                  NextField
+               else if curFld <> nil then begin
+                  SetPort(myWindow);
+                  ClipRect(myWindow^.portRect);
+                  if ch = chr(8) then begin         { BACKSPACE }
+                     CaretOn(curFld, dlgFSH);       { known caret state before an }
+                                                    { edit - 06-lib-fe CaretOn    }
+                     Backspace(curFld, dlgFSH, ferr);
+                     if ferr <> 0 then BeepAlert(1);   { at field start etc. }
+                     DrawField(curFld, dlgFSH, true, true)
+                  end
+                  else if (isCustom and (ch >= '0') and (ch <= '9')) or
+                          ((not isCustom) and (ch >= ' ')) then begin
+                     { Digits only in the numeric fields; any printable in    }
+                     { the name field.  Everything else beeps below.  This    }
+                     { is the "digits only" rule enforced at the keystroke;   }
+                     { OK-time validation still range-checks the number.      }
+                     CaretOn(curFld, dlgFSH);
+                     InsCh(ch, curFld, dlgFSH, ferr);   { may move handles (trap 1) }
+                     if ferr <> 0 then BeepAlert(1);    { fldFull: 3 digits max }
+                     DrawField(curFld, dlgFSH, true, true)
+                  end
+                  else
+                     BeepAlert(1)         { not a key this field accepts }
+               end
+            end
+         end;
+
+      folderActivate :
+         begin
+            { The standard activate handshake, dialog flavour: complete the   }
+            { WM handshake, rebuild OUR menu bar (with the dialog gray        }
+            { state), and un-dim the field selection (06-lib-wm-a             }
+            { TakeControl; 06-lib-fe ChangeSelHilight).                       }
+            TakeControl(theEvent, false, false);
+            PutUpDlgMenus;
+            if curFld <> nil then begin
+               SetPort(myWindow);
+               ClipRect(myWindow^.portRect);
+               ChangeSelHilight(curFld, dlgFSH, false)    { bright again }
+            end
+         end;
+
+      folderDeactivate :
+         begin
+            { Dim the selection (the inactive look), then hand control over.  }
+            { GiveControl must be the LAST step -- it completes the WM's      }
+            { two-process handoff (06-lib-wm-a section 3).                    }
+            if curFld <> nil then begin
+               SetPort(myWindow);
+               ClipRect(myWindow^.portRect);
+               ChangeSelHilight(curFld, dlgFSH, true)
+            end;
+            GiveControl(theEvent)
+         end;
+
+      folderUpdate :
+         begin
+            { Redraw the damaged area: window contents first, panel on top.   }
+            { BeginUpdate clips everything to the damage, so this is cheap    }
+            { even though it names the whole window (06-lib-wm-a).            }
+            BeginUpdate(theEvent.who);
+            DrawContents(theEvent.who);
+            if theEvent.who = myWindow then DrawPanel;
+            EndUpdate(theEvent.who)
+         end;
+
+      filerEvent :
+         begin
+            { The Filer waits for no dialog.  Answer with the shared          }
+            { handler; if it closed our window or told us to die, the         }
+            { dialog folds as a Cancel.  (wantsOpen can only be set by an     }
+            { fcNone, and fcNone cannot arrive here -- a dialog only exists   }
+            { after the window is open -- so the flag is ignored.)            }
+            HandleFilerOp(dummyOpen);
+            if toldToDie or (myWindow = nil) then begin
+               dlgAccepted := false;
+               dlgDone := true
+            end
+         end;
+
+      otherwise
+         { folderMoved (nothing cached), abortEvent, disk/catalog events:     }
+         { nothing to do in a dialog.                                         }
+
+   end { case }
+end;
+
+{------------------------------------------------------------------------------}
+{  RunDialog -- the nested modal loop shared by both dialogs.  The same       }
+{  two-phase shape as the main loop (03-app-template section 4): blocked      }
+{  GetEvent while inactive (costs nothing), poll-and-yield while active.      }
+{  The idle branch is where the caret blinks -- the FE hands back timeout     }
+{  intervals and expects the client's loop to call BlinkCaret when they       }
+{  expire (06-lib-fe section 3.8).                                            }
+{------------------------------------------------------------------------------}
+
+function RunDialog : boolean;
+begin
+   dlgDone := false;
+   dlgAccepted := false;
+   lastFldHnd := nil;
+   lastFldTime := 0;
+
+   while not dlgDone do begin
+
+      if not ImActive then begin
+         { Phase A, dialog edition: we are in the background; block until     }
+         { something arrives (GetEvent may suspend the process entirely --    }
+         { free of charge, 06-lib-wm-a GetEvent).                             }
+         GetEvent(theEvent);
+         DlgProcessEvent
+      end
+      else if EventAvail then begin
+         GetEvent(theEvent);
+         DlgProcessEvent
+      end
+      else begin
+         { Idle and active: blink the caret if its interval has expired,      }
+         { then ALWAYS yield.  A Phase-B loop that fails to LetOthersRun      }
+         { starves the Filer and hangs the machine (03-app-template 4).       }
+         if (curFld <> nil) and (blinkT > 0) then
+            if Time >= nextBlink then begin
+               SetPort(myWindow);
+               ClipRect(myWindow^.portRect);
+               BlinkCaret(curFld, dlgFSH, blinkT);   { inverts the caret; returns }
+                                                     { the next half-period       }
+               if blinkT > 0 then nextBlink := Time + blinkT
+            end;
+         LetOthersRun
+      end
+
+   end;
+
+   RunDialog := dlgAccepted
+end;
+
+{==============================================================================}
+{  The public routines                                                         }
+{==============================================================================}
+
+{------------------------------------------------------------------------------}
+procedure InitDialogs {var err : integer};
+var trpl    : Tstr;                       { string[50] -- FEDec's Ttriple target }
+    s       : Str255;
+    zeroR   : Rect;
+begin
+   err := 0;
+
+   { Trap 3: the word-classification triples for double-click selection.      }
+   { Groups of four characters, <left><this><right><space>, 'x' = any,       }
+   { 'A' = alpha, '9' = digit (06-lib-fe, qualifies).  The value in the      }
+   { phrase file is the Calculator's own; a numeric field barely exercises   }
+   { it, but the name field gets sensible word selection from it.            }
+   GetPhrase(phTriples, s);
+   trpl := copy(s, 1, 50);                { Tstr is string[50]; clip to fit }
+
+   FEInit(theHeap, @trpl, err);           { once, before any other FE call - 06-lib-fe }
+   { FEInit COPIES the triples, so trpl (a local) is safe to lose.  It also   }
+   { allocates the undo buffer -- err = FEallocationFailed (8) on a full     }
+   { heap, which our caller treats as fatal.                                  }
+   if err <> 0 then exit(InitDialogs);
+
+   { The fields.  Coords are dummies here (LayoutPanel sets real ones each    }
+   { time a dialog opens, because the window size changes with the level).   }
+   { Arguments (06-lib-fe CreateField, cf. APHP-HP.TEXT:2066):                }
+   {   rect, maxLen, growLen(0 = fixed capacity -- the cap IS the feature    }
+   {   for a 3-digit box), align, drawPad, maxFmts, growFmts, font, protect. }
+   SetRect(zeroR, 0, 0, 0, 0);
+   fldW    := CreateField(zeroR, numFldLen,  0, right, 4, 1, 0, fntLabel, false);
+   fldH    := CreateField(zeroR, numFldLen,  0, right, 4, 1, 0, fntLabel, false);
+   fldM    := CreateField(zeroR, numFldLen,  0, right, 4, 1, 0, fntLabel, false);
+   fldName := CreateField(zeroR, nameFldLen, 0, left,  4, 1, 0, fntLabel, false);
+   { Numbers right-aligned (they grow leftward like a calculator), names      }
+   { left-aligned like prose.                                                 }
+
+   if (fldW = nil) or (fldH = nil) or (fldM = nil) or (fldName = nil) then begin
+      err := FEallocationFailed;          { CreateField returns nil on a full heap }
+      exit(InitDialogs)
+   end;
+
+   { The one shared fieldState, allocated raw from OUR heap: note this is    }
+   { NewHandle + a cast, NOT a CreateField -- the state is just a block of   }
+   { the right size that InitFState/SelectAll will fill (exactly the         }
+   { Calculator's move, APHP-HP.TEXT:2067: pointer(ord(newHandle(...)))).    }
+   dlgFSH := pointer(ord(NewHandle(sizeof(fieldState))));
+
+   curFld := nil;
+   blinkT := -1
+end;
+
+{------------------------------------------------------------------------------}
+function DoCustomDialog {(var w, h, m : integer) : boolean};
+var s        : Str255;
+    finished : boolean;      { leave the OK/validate/retry cycle }
+    accepted : boolean;      { the function result being built   }
+begin
+   isCustom := true;
+
+   { Seed the boxes with the remembered previous custom game (persisted in    }
+   { the data segment like everything else).                                  }
+   LayoutPanel;
+   IntToText(myDoc^.customW, s);   StuffField(fldW, s);
+   IntToText(myDoc^.customH, s);   StuffField(fldH, s);
+   IntToText(myDoc^.customM, s);   StuffField(fldM, s);
+
+   SetDlgMenuState(true);                 { Edit wakes, everything else sleeps }
+   DrawPanel;
+   SetFocusAll(fldW);                     { caret in the first box, all selected }
+
+   { The OK / validate / retry cycle.  RunDialog returns true for OK, false   }
+   { for Cancel (or a Filer-forced close).  On OK with a bad value,           }
+   { ValidateCustom has already shown alert 50 and put the caret back on the  }
+   { offender, so we simply run the dialog again -- the user fixes the value  }
+   { or cancels.  Never clamp, never accept garbage.                          }
+   finished := false;
+   accepted := false;
+   repeat
+      if RunDialog then begin
+         if ValidateCustom(w, h, m) then begin
+            myDoc^.customW := w;          { remember for next time (persistent) }
+            myDoc^.customH := h;
+            myDoc^.customM := m;
+            accepted := true;
+            finished := true
+         end
+         { else: not finished; around again with the bad field selected }
+      end
+      else
+         finished := true                 { cancelled }
+   until finished;
+
+   SetDlgMenuState(false);                { menus back to normal }
+   DropFocus;                             { no caret survives the dialog }
+   DrawContents(myWindow);                { lift the panel off the board }
+   DoCustomDialog := accepted
+end;
+
+{------------------------------------------------------------------------------}
+function DoNameDialog {(var winnerName : Str255) : boolean};
+var s : Str255;
+begin
+   isCustom := false;
+
+   LayoutPanel;
+   s := '';
+   StuffField(fldName, s);                { start empty }
+
+   SetDlgMenuState(true);
+   DrawPanel;
+   SetFocusAll(fldName);
+
+   if RunDialog then begin
+      DropFocus;                          { pack, then read (trap 2) }
+      FieldText(fldName, winnerName);
+      DoNameDialog := true
+   end
+   else begin
+      DropFocus;
+      winnerName := '';
+      DoNameDialog := false               { cancelled: the caller records nothing }
+   end;
+
+   SetDlgMenuState(false);
+   DrawContents(myWindow)                 { lift the panel }
+end;
+
+end.

@@ -1,0 +1,404 @@
+{==============================================================================}
+{                                                                              }
+{  MINESWEEPER-GAME.TEXT  --  unit MSGame                                      }
+{                                                                              }
+{  Pure game logic.  This unit draws nothing, reads no events, and knows       }
+{  nothing about windows, timers or the Filer: it only mutates the document    }
+{  record myDoc^ that MSGlobals declares (and that physically lives in the     }
+{  data segment, so every mutation made here is automatically persistent).     }
+{                                                                              }
+{  Everything user-interface-ish -- when to start the clock, what to redraw,   }
+{  which alert to show -- is the main program's business.  Keeping the rules   }
+{  separate from the machinery is not just taste: it is what makes the LOS     }
+{  lifecycle easy to get right, because "resume a set-aside game" needs NO     }
+{  code here at all (the board simply comes back with the segment).            }
+{                                                                              }
+{  Compiled second: it needs only MSGlobals (plus the standard spine, which    }
+{  MSGlobals' interface types drag in -- a client of a unit must also 'uses'   }
+{  the units that unit's INTERFACE mentions, 02-workshop-build section 5.2).   }
+{                                                                              }
+{==============================================================================}
+
+unit MSGame;
+
+INTERFACE
+
+uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-lib-sm   }
+     (*$U UnitHz.obj *)         UnitHz,      { THz (via MSGlobals)       - 06-lib-sm   }
+     (*$U Storage.obj *)        Storage,     { theHeap (via MSGlobals)   - 06-lib-qd-b }
+     (*$U QuickDraw.obj *)      QuickDraw,   { Random / randSeed         - 06-lib-qd-b }
+     (*$U Fontmgr.obj *)        FontMgr,     { font consts (via MSGlobals) - 06-lib-fm }
+     (*$U libos/SysCall.obj *)  SysCall,     { types used by MSGlobals   - 05-os-syscalls }
+     (*$U wm.events.obj *)      Events,      { EventRecord (via MSGlobals) - 06-lib-wm-a }
+     (*$U wm.folders.obj *)     Folders,     { WindowPtr etc.            - 06-lib-wm-a }
+     (*$U wm.menus.obj *)       Menus,       { MenuInfo (via MSGlobals)  - 06-lib-wm-b }
+     (*$U AlertMgr.obj *)       AlertMgr,    { TAlertFile (via MSGlobals) - 06-lib-am  }
+     (*$U WMLstd.obj *)         WMLstd,      { building-block decls      - 06-lib-sb   }
+     (*$U WMlCrs.obj *)         WMLCrs,      { cursor decls              - 06-lib-sb   }
+     (*$U FilerComm.obj *)      FilerComm,   { FilerExt (via MSGlobals)  - 06-lib-fc   }
+     (*$U MINESWEEPER-GLOBALS.OBJ *) MSGlobals;  { our own base unit }
+
+
+{ StartNewGame -- deal a fresh, EMPTY board of the given size.                }
+{                                                                              }
+{   level   which level this board belongs to (records are only kept for the  }
+{           three fixed levels; lvCustom never sets a record)                  }
+{   w, h    board size in cells; the caller has already validated them        }
+{           against the limits in MSGlobals                                    }
+{   m       how many mines the board will eventually hold                     }
+{                                                                              }
+{ NOTE THAT NO MINES ARE PLACED HERE.  The board stays mineless (state =      }
+{ msFresh) until the player's FIRST click, and only then does PlaceMines      }
+{ salt the board -- excluding that click and its neighbours.  This is the     }
+{ classic "first-click safety" rule: the first reveal must never be a mine,   }
+{ and by excluding the whole 3x3 neighbourhood it always opens a region.      }
+{ Called by: MenuCommand (New Game / level change / Custom OK), the reset     }
+{ button, and InitNewDoc when the segment was created fresh.                  }
+{                                                                              }
+{ (The parameter is called newLevel, not level: the body works inside a       }
+{ 'with myDoc^', where a parameter named 'level' would SHADOW the record      }
+{ field 'level' and the assignment would silently set the parameter to        }
+{ itself.  Scope capture inside 'with' is a classic Pascal trap -- name       }
+{ your parameters so it cannot arise.)                                        }
+
+procedure StartNewGame (newLevel : MSLevel; w, h, m : integer);
+
+
+{ PlaceMines -- salt the fresh board with myDoc^.mineCount mines, none of     }
+{ them at (avoidC, avoidR) or any of its 8 neighbours, then compute every     }
+{ cell's adjacent-mine count and flip the game to msPlaying.                  }
+{                                                                              }
+{   avoidC, avoidR   the cell of the player's first click (1-based)           }
+{                                                                              }
+{ Called by: the main program's click handler, exactly once per game, when a  }
+{ reveal arrives while state = msFresh.  The caller starts the timer -- the   }
+{ clock is UI, not rules.                                                     }
+
+procedure PlaceMines (avoidC, avoidR : integer);
+
+
+{ RevealCell -- the player opens cell (c, r).                                 }
+{                                                                              }
+{ Flagged or already-revealed cells are ignored (a flag protects a cell from  }
+{ mis-clicks -- that is its whole point).  Revealing a mine loses the game    }
+{ (state := msLost, fatalCol/Row remember which one for the drawing code).    }
+{ Revealing a safe cell opens it; if its adjacent count is 0 the reveal       }
+{ FLOODS outward until it reaches numbered cells -- the classic "opening".    }
+{ When the last safe cell is opened the game is won (state := msWon) and the  }
+{ remaining mines are auto-flagged as a courtesy, as the original game does.  }
+{                                                                              }
+{ Called by: the click handler (plain reveal) and ChordCell.                  }
+
+procedure RevealCell (c, r : integer);
+
+
+{ ToggleFlag -- plant or lift a flag on covered cell (c, r).  Revealed cells  }
+{ cannot be flagged.  Keeps flagsPlaced current (the mine-counter readout is  }
+{ mineCount - flagsPlaced).  Called by the click handler (Option-click, or    }
+{ any click while Flag Mode is on).                                           }
+
+procedure ToggleFlag (c, r : integer);
+
+
+{ AdjFlags -- how many of (c, r)'s 8 neighbours currently carry a flag.       }
+{ Used by ChordCell's safety test; exposed so the main program could show     }
+{ chord feedback if it ever wants to.                                         }
+
+function AdjFlags (c, r : integer) : integer;
+
+
+{ ChordCell -- the double-click "chord" on a revealed, numbered cell: if the  }
+{ player has planted exactly as many flags around it as its number demands,   }
+{ open ALL its unflagged covered neighbours in one stroke.  If the flags are  }
+{ wrong, one of those neighbours is a mine and the game is honestly lost --   }
+{ that is the gamble the chord has always been.  A chord on a cell whose      }
+{ flag count does not match its number does nothing at all.                   }
+{ Called by: the click handler on a double-click in a revealed cell.          }
+
+procedure ChordCell (c, r : integer);
+
+
+IMPLEMENTATION
+
+var
+   { The flood-fill worklist.  Revealing a 0-count cell must also reveal its  }
+   { neighbours, recursively.  A 30x18 board can cascade through all 540      }
+   { cells; doing that with actual Pascal recursion could push the stack      }
+   { hundreds of frames deep, and the default Workshop link gives a process   }
+   { only 10000 bytes of dynamic stack (02-workshop-build section 7.5, the    }
+   { +S option).  An explicit worklist in static storage costs 2 KB once and  }
+   { cannot overflow anything.  (maxCols * maxRows = 540 entries is enough    }
+   { because a cell enters the list at most once, gated by isRevealed.)       }
+   workC : array [1..540] of integer;    { 540 = maxCols * maxRows }
+   workR : array [1..540] of integer;
+   workTop : integer;                    { number of entries in use }
+
+
+{------------------------------------------------------------------------------}
+{  RandomBelow -- a uniform-ish random integer in 0..n-1.                       }
+{                                                                               }
+{  QuickDraw's Random returns -32768..32767 (06-lib-qd-b).  Two traps when      }
+{  folding that into a range:                                                   }
+{    1. abs(-32768) does not exist in 16-bit arithmetic (there is no +32768),   }
+{       so the usual abs(Random) mod n can overflow.  Mapping r := -(r+1) for   }
+{       negative r folds the range to 0..32767 safely.                          }
+{    2. mod introduces a slight bias toward small values when n does not        }
+{       divide 32768; for board sizes (n <= 30) the bias is far below anything  }
+{       a player could perceive, so we accept it rather than loop-and-reject.   }
+{------------------------------------------------------------------------------}
+
+function RandomBelow (n : integer) : integer;
+var r : integer;
+begin
+   r := Random;                          { -32768..32767 - QuickDraw, 06-lib-qd-b }
+   if r < 0 then r := -(r + 1);          { fold negatives to 0..32767 without overflow }
+   RandomBelow := r mod n                { 0..n-1 }
+end;
+
+
+{------------------------------------------------------------------------------}
+procedure StartNewGame {newLevel : MSLevel; w, h, m : integer};
+{ (Parameter list repeated in a comment -- the Lisa Pascal unit convention,    }
+{ cf. APHP-HP.TEXT:448; the real list is on the INTERFACE declaration.)        }
+var c, r : integer;
+begin
+   with myDoc^ do begin
+      level      := newLevel;      { see the shadowing note on the declaration }
+      cols       := w;
+      rows       := h;
+      mineCount  := m;
+      state      := msFresh;       { mineless until the first click -- see PlaceMines }
+      elapsed    := 0;             { the clock shows 0 until the first reveal }
+      flagsPlaced:= 0;
+      cellsToGo  := w * h - m;     { revealing this many safe cells wins }
+      fatalCol   := 0;             { no fatal mine yet }
+      fatalRow   := 0;
+
+      { Clear the WHOLE storage array, not just the w x h part in use: a      }
+      { smaller next board must not inherit stale mines outside its bounds    }
+      { (the drawing and logic loops only visit 1..rows/1..cols, but being    }
+      { tidy here makes the data segment's contents deterministic).           }
+      for r := 1 to maxRows do
+         for c := 1 to maxCols do begin
+            cells[r, c].isMine     := false;
+            cells[r, c].isRevealed := false;
+            cells[r, c].isFlagged  := false;
+            cells[r, c].adjMines   := 0
+         end
+   end
+end;
+
+
+{------------------------------------------------------------------------------}
+procedure PlaceMines {avoidC, avoidR : integer};
+var placed  : integer;      { mines placed so far }
+    c, r    : integer;      { candidate cell }
+    dc, dr  : integer;      { neighbour offsets }
+    n       : integer;      { adjacency accumulator }
+    inHalo  : boolean;      { is the candidate inside the protected 3x3? }
+begin
+   { Seed the generator from the boot-relative clock so every game deals a    }
+   { different board.  randSeed is QuickDraw's public seed variable and Time  }
+   { is hundredths of a second since boot (06-lib-qd-a section 2.16,          }
+   { 06-lib-wm-a Time) -- two launches a hundredth of a second apart already  }
+   { get different decks, which is as random as a solitaire game needs.       }
+   randSeed := Time;
+
+   with myDoc^ do begin
+
+      { Scatter the mines by rejection: pick a random cell, keep it if it is  }
+      { not already mined and not inside the protected 3x3 halo around the    }
+      { first click.  The Custom dialog capped mines at w*h - 9 precisely so  }
+      { that this loop always has at least one legal cell left and cannot     }
+      { spin forever (MSGlobals; the halo is at most 9 cells).                }
+      placed := 0;
+      while placed < mineCount do begin
+         c := 1 + RandomBelow(cols);
+         r := 1 + RandomBelow(rows);
+         inHalo := (abs(c - avoidC) <= 1) and (abs(r - avoidR) <= 1);
+         if (not cells[r, c].isMine) and (not inHalo) then begin
+            cells[r, c].isMine := true;
+            placed := placed + 1
+         end
+      end;
+
+      { Now every cell's number: count the mines in its 8 neighbours.  Done   }
+      { once per game, brute force over the board -- 540 cells x 8 looks is   }
+      { trivial even on a 68000, and doing it in one sweep here keeps         }
+      { RevealCell simple.                                                    }
+      for r := 1 to rows do
+         for c := 1 to cols do begin
+            n := 0;
+            for dr := -1 to 1 do
+               for dc := -1 to 1 do
+                  { The bounds tests keep us on the board; the (dc,dr)=(0,0)  }
+                  { case is harmless to include or exclude -- a mine's own    }
+                  { count is never displayed -- but we exclude it for truth.  }
+                  if (dc <> 0) or (dr <> 0) then
+                     if (c + dc >= 1) and (c + dc <= cols) and
+                        (r + dr >= 1) and (r + dr <= rows) then
+                        if cells[r + dr, c + dc].isMine then n := n + 1;
+            cells[r, c].adjMines := n
+         end;
+
+      { The game proper begins with this click.  The CALLER starts the clock  }
+      { (startRef and elapsed are timer/UI state -- see UpdateTimer in the    }
+      { main program); the rules only record that play is under way.          }
+      state := msPlaying
+   end
+end;
+
+
+{------------------------------------------------------------------------------}
+procedure RevealCell {c, r : integer};
+var dc, dr : integer;
+    cc, rr : integer;
+begin
+   with myDoc^ do begin
+
+      { A finished game is inert: nothing reveals after a win or loss.  This  }
+      { guard also stops ChordCell's neighbour sweep the moment one of the    }
+      { chorded cells turns out to be a mine.                                 }
+      if (state = msWon) or (state = msLost) then exit(RevealCell);
+
+      { Flags protect; open cells are already open. }
+      if cells[r, c].isFlagged then exit(RevealCell);
+      if cells[r, c].isRevealed then exit(RevealCell);
+
+      if cells[r, c].isMine then begin
+         { Stepped on it.  Mark which one for the drawing code (it paints the }
+         { fatal mine on an inverted cell) and freeze the game.  The main     }
+         { program handles everything theatrical: revealing the rest of the  }
+         { mines is a DRAWING decision (the cells stay unrevealed in the     }
+         { data, MSDraw shows mines through covered cells when state =       }
+         { msLost), the beep, and freezing the clock.                        }
+         cells[r, c].isRevealed := true;
+         fatalCol := c;
+         fatalRow := r;
+         state := msLost;
+         exit(RevealCell)
+      end;
+
+      { Safe cell: open it, then flood outward from every 0-count cell using  }
+      { the explicit worklist (see the comment at the 'var' above for why    }
+      { not recursion).  Invariant: a cell is pushed at most once, because   }
+      { it is marked isRevealed at push time, and only unrevealed cells are  }
+      { ever pushed.                                                          }
+      cells[r, c].isRevealed := true;
+      cellsToGo := cellsToGo - 1;
+      workTop := 0;
+      if cells[r, c].adjMines = 0 then begin
+         workTop := 1;  workC[1] := c;  workR[1] := r
+      end;
+
+      while workTop > 0 do begin
+         { Pop one opened 0-count cell... }
+         cc := workC[workTop];
+         rr := workR[workTop];
+         workTop := workTop - 1;
+         { ...and open all 8 of its neighbours.  A neighbour of a 0-count     }
+         { cell can never be a mine (its count would not be 0), so this      }
+         { sweep cannot lose the game.  Flags CAN sit on such cells (the     }
+         { player was wrong); the classic rule is that the flood lifts       }
+         { nothing -- flagged cells stay closed, which is why we skip them.  }
+         for dr := -1 to 1 do
+            for dc := -1 to 1 do
+               if (dc <> 0) or (dr <> 0) then
+                  if (cc + dc >= 1) and (cc + dc <= cols) and
+                     (rr + dr >= 1) and (rr + dr <= rows) then
+                     if (not cells[rr + dr, cc + dc].isRevealed) and
+                        (not cells[rr + dr, cc + dc].isFlagged) then begin
+                        cells[rr + dr, cc + dc].isRevealed := true;
+                        cellsToGo := cellsToGo - 1;
+                        if cells[rr + dr, cc + dc].adjMines = 0 then begin
+                           { Another opening cell: queue it so ITS neighbours }
+                           { get opened too.                                  }
+                           workTop := workTop + 1;
+                           workC[workTop] := cc + dc;
+                           workR[workTop] := rr + dr
+                        end
+                     end
+      end;
+
+      { Win check: all safe cells open?  Flag the surviving mines as the      }
+      { original game does (pure courtesy -- and it snaps the mine counter    }
+      { to 000, which is the satisfying part).                                }
+      if cellsToGo = 0 then begin
+         state := msWon;
+         for rr := 1 to rows do
+            for cc := 1 to cols do
+               if cells[rr, cc].isMine then
+                  cells[rr, cc].isFlagged := true;
+         flagsPlaced := mineCount
+      end
+   end
+end;
+
+
+{------------------------------------------------------------------------------}
+procedure ToggleFlag {c, r : integer};
+begin
+   with myDoc^ do begin
+      if (state = msWon) or (state = msLost) then exit(ToggleFlag);  { board is inert }
+      if cells[r, c].isRevealed then exit(ToggleFlag);   { can't flag an open cell }
+      if cells[r, c].isFlagged then begin
+         cells[r, c].isFlagged := false;
+         flagsPlaced := flagsPlaced - 1
+      end
+      else begin
+         cells[r, c].isFlagged := true;
+         flagsPlaced := flagsPlaced + 1
+         { No cap on flags: the player may plant more flags than there are    }
+         { mines, and the mine counter (mineCount - flagsPlaced) then goes    }
+         { negative, exactly as in the original.  The counter drawing code    }
+         { clamps the DISPLAY, not the count.                                 }
+      end
+   end
+end;
+
+
+{------------------------------------------------------------------------------}
+function AdjFlags {(c, r : integer) : integer};
+var dc, dr, n : integer;
+begin
+   n := 0;
+   with myDoc^ do
+      for dr := -1 to 1 do
+         for dc := -1 to 1 do
+            if (dc <> 0) or (dr <> 0) then
+               if (c + dc >= 1) and (c + dc <= cols) and
+                  (r + dr >= 1) and (r + dr <= rows) then
+                  if cells[r + dr, c + dc].isFlagged then n := n + 1;
+   AdjFlags := n
+end;
+
+
+{------------------------------------------------------------------------------}
+procedure ChordCell {c, r : integer};
+var dc, dr : integer;
+begin
+   with myDoc^ do begin
+      if state <> msPlaying then exit(ChordCell);        { only mid-game }
+      if not cells[r, c].isRevealed then exit(ChordCell); { chord only on open cells }
+      if cells[r, c].adjMines = 0 then exit(ChordCell);   { a blank has nothing to chord }
+
+      { The safety interlock: the chord fires only when the player has        }
+      { committed exactly the right NUMBER of flags around the cell.  Whether }
+      { they are the right CELLS is the player's problem -- a misplaced flag  }
+      { means one of the cells we are about to open is a mine, and RevealCell }
+      { will end the game on it (its state guard then stops the rest of the   }
+      { sweep).                                                               }
+      if AdjFlags(c, r) <> cells[r, c].adjMines then exit(ChordCell);
+
+      for dr := -1 to 1 do
+         for dc := -1 to 1 do
+            if (dc <> 0) or (dr <> 0) then
+               if (c + dc >= 1) and (c + dc <= cols) and
+                  (r + dr >= 1) and (r + dr <= rows) then
+                  { RevealCell itself skips flagged and already-open cells,   }
+                  { so the plain call is safe for every neighbour.            }
+                  RevealCell(c + dc, r + dr)
+   end
+end;
+
+end.

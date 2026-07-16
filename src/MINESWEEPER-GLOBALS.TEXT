@@ -1,0 +1,504 @@
+{==============================================================================}
+{                                                                              }
+{  MINESWEEPER-GLOBALS.TEXT  --  unit MSGlobals                                }
+{                                                                              }
+{  Minesweeper for the Lisa Office System.  A directly-launchable tool in     }
+{  the style of the Calculator (APHP) and the Clock (APCL).                    }
+{                                                                              }
+{  THIS SOURCE IS A TEACHING AID.  It is commented far more densely than       }
+{  production code would be, because its purpose is to show a Pascal           }
+{  programmer who has never seen a Lisa how a native LOS application is        }
+{  put together.  Citations like "06-lib-wm-a" name chapters of the LOS        }
+{  developer's manual this program was written against; citations like         }
+{  "APHP-HP.TEXT:1971" point into the shipped Apple source.                    }
+{                                                                              }
+{  This unit is the BASE of the build.  It holds every constant, type and      }
+{  global variable that more than one of the other units needs, plus one       }
+{  shared routine (HandleFilerOp, see the bottom of this file).  The build     }
+{  order is dependency order, because the Lisa Pascal compiler reads a used    }
+{  unit's interface out of its already-compiled .OBJ file (02-workshop-build   }
+{  section 5.2):                                                               }
+{                                                                              }
+{      MSGlobals  ->  MSGame  ->  MSDraw  ->  MSDialog  ->  program            }
+{                                                                              }
+{  NOTE ON THE TOOL NUMBER: you will not find the tool number anywhere in      }
+{  this unit, or in any source file of this program.  The number lives only    }
+{  in MINESWEEPER-MAKE.TEXT.  At run time the program recovers its own tool    }
+{  number from its own pathname -- see Initialize in MINESWEEPER-MAIN.TEXT     }
+{  and 03-app-template.md section 5.5t.                                        }
+{                                                                              }
+{==============================================================================}
+
+unit MSGlobals;
+
+INTERFACE
+
+{ The "uses spine".  Every unit named here is pulled in by a $U directive     }
+{ that names its compiled object file; the unit name and the file name need   }
+{ not match (02-workshop-build section 5.2).  Order matters only in that a    }
+{ unit must come after the units its own interface depends on; this is the    }
+{ same ordering the Calculator uses (APHP-HP.TEXT:5-33).                      }
+
+uses (*$U UnitStd.obj *)        UnitStd,    { base types: TC, TB, TP ...        - 06-lib-sm   }
+     (*$U UnitHz.obj *)         UnitHz,     { heap zones: THz, HAllocate ...    - 06-lib-sm   }
+     (*$U Storage.obj *)        Storage,    { theHeap, NewHandle, InitHeap      - 06-lib-qd-b }
+     (*$U QuickDraw.obj *)      QuickDraw,  { Rect, Point, Str255, drawing      - 06-lib-qd-a }
+     (*$U Fontmgr.obj *)        FontMgr,    { font family numbers (tile12 ...)  - 06-lib-fm   }
+     (*$U libos/SysCall.obj *)  SysCall,    { processes, data segs, exceptions  - 05-os-syscalls }
+     (*$U wm.events.obj *)      Events,     { EventRecord, GetEvent, Time ...   - 06-lib-wm-a }
+     (*$U wm.folders.obj *)     Folders,    { windows, TakeControl, updates     - 06-lib-wm-a }
+     (*$U wm.menus.obj *)       Menus,      { MenuInfo, InsertMenu, MenuSelect  - 06-lib-wm-b }
+     (*$U AlertMgr.obj *)       AlertMgr,   { alerts + phrase file: TAlertFile  - 06-lib-am   }
+     (*$U WMLstd.obj *)         WMLstd,     { shared window-building-block decls - 06-lib-sb  }
+     (*$U WMlCrs.obj *)         WMLCrs,     { cursors: InitWmlCrs               - 06-lib-sb   }
+     (*$U FilerComm.obj *)      FilerComm;  { the Filer protocol: TellFiler ... - 06-lib-fc   }
+     { We use the LIBRARY FilerComm (spelling GetAddParms), not the app-local  }
+     { copy the Calculator links (which spells it GetAddParams) -- see the     }
+     { naming-trap note in 03-app-template.md section 2.                       }
+
+const
+
+   {---------------------------------------------------------------------------}
+   { Document / data-segment layout                                             }
+   {---------------------------------------------------------------------------}
+
+   msDocVersion = 1;      { Version stamp stored in the data segment.  If we    }
+                          { reopen a segment whose stamp does not match (an     }
+                          { older build, or garbage after a crash -- see the    }
+                          { -321 e_baddata warning, 05-os-syscalls section 1.6) }
+                          { we throw the contents away and start with defaults, }
+                          { exactly as the Calculator does with its own stamp.  }
+
+   {---------------------------------------------------------------------------}
+   { Board geometry.                                                            }
+   {                                                                            }
+   { THE LISA'S PIXELS ARE NOT SQUARE.  The screen is 720 x 364 pixels on a     }
+   { physically 4:3 tube, so each pixel is only 2/3 as wide as it is tall       }
+   { (06-lib-hw, MouseScaling: "horizontal is magnified 3/2 relative to         }
+   { vertical to compensate for the display's 2/3 pixel aspect ratio").         }
+   { Check: 720 * (2/3) : 364  =  480 : 364  ~  4 : 3.                          }
+   {                                                                            }
+   { Therefore anything that should LOOK square must be drawn 3:2 in pixels.    }
+   { A cell is 21 pixels wide by 14 tall: 21 * (2/3) = 14, so on glass it       }
+   { reads as a square.  The same correction is applied to the mine, the       }
+   { reset button, and the face in MSDraw.                                      }
+   {---------------------------------------------------------------------------}
+
+   cellW = 21;            { cell width in pixels  (3 units of 7)  }
+   cellH = 14;            { cell height in pixels (2 units of 7) -- 3:2 = square on glass }
+
+   winMargin = 8;         { white border between the window edge and everything else }
+   statusH   = 40;        { height of the status bar (counters + reset button) }
+   statusGap = 8;         { gap between the status bar and the board           }
+
+   { The board's top-left corner inside the window, derived from the above.    }
+   { Lisa Pascal allows a constant to be defined from earlier constants only   }
+   { by naming ONE of them, so these are spelled out; the arithmetic is:       }
+   {    boardLeft = winMargin                    =  8                          }
+   {    boardTop  = winMargin+statusH+statusGap  =  8 + 40 + 8 = 56            }
+   boardLeft = 8;
+   boardTop  = 56;
+
+   {---------------------------------------------------------------------------}
+   { Levels.                                                                    }
+   {                                                                            }
+   { Window-size check for the WORST case, Expert (30 x 16).  FolderSize        }
+   { clamps to maxWindWidth = 720 / maxWindHeight = 364 (06-lib-wm-a, the       }
+   { Folders constants) -- it would silently CROP an oversized window rather    }
+   { than refuse it, so we prove the fit ourselves:                             }
+   {                                                                            }
+   {    width  = 2*winMargin + 30*cellW            = 16 + 630       = 646 <= 720  OK }
+   {    height = 2*winMargin + statusH + statusGap                              }
+   {             + 16*cellH                        = 16+40+8 + 224  = 288 <= 364  OK }
+   {                                                                            }
+   { And for the LARGEST custom board we allow (30 x 18):                       }
+   {    width  = 16 + 630                          = 646 <= 720  OK             }
+   {    height = 64 + 18*14 = 64 + 252             = 316 <= 364  OK             }
+   {                                                                            }
+   { (The strict screen maxima would be 33 columns (16+33*21=709) and 21 rows   }
+   { (64+21*14=358), but the custom limits are capped at the Expert width and   }
+   { 18 rows: the board never grows wider than the standard levels, the        }
+   { window keeps clear of the screen edges, and the fixed-size cells array    }
+   { in the data segment stays small.)                                          }
+   {---------------------------------------------------------------------------}
+
+   begCols = 9;    begRows = 9;    begMines = 10;     { Beginner     }
+   intCols = 16;   intRows = 16;   intMines = 40;     { Intermediate }
+   expCols = 30;   expRows = 16;   expMines = 99;     { Expert       }
+
+   minCusDim   = 8;    { smallest custom width AND height }
+   maxCusCols  = 30;   { largest custom width  -- see the fit proof above }
+   maxCusRows  = 18;   { largest custom height -- see the fit proof above }
+   minCusMines = 1;    { at least one mine, or there is no game            }
+   { The custom mine MAXIMUM is w*h - 9, computed at validation time: the      }
+   { first click and its 8 neighbours must be guaranteed mine-free (first-     }
+   { click safety, see PlaceMines in MSGame), so 9 cells can never hold mines. }
+
+   maxCols = 30;          { storage bounds of the cells array = the largest    }
+   maxRows = 18;          { board we ever allow.  The data segment is fixed-   }
+                          { size, so the array is dimensioned for the maximum, }
+                          { not for the current level (the segment cannot      }
+                          { conveniently grow and shrink with the level).      }
+
+   {---------------------------------------------------------------------------}
+   { Timer and best times                                                       }
+   {---------------------------------------------------------------------------}
+
+   maxTimer = 999;        { the elapsed readout is three digits; it pegs at 999 }
+   noBest   = 32767;      { sentinel in bestTime[] meaning "no record yet".     }
+                          { Any real winning time compares smaller, so the      }
+                          { first win at a level always sets the record.        }
+
+   {---------------------------------------------------------------------------}
+   { Menus.                                                                     }
+   {                                                                            }
+   { A menu's number is its menuId: the value InitMP reads from the first      }
+   { line of the menu's block in the phrase file, and the value MenuSelect /   }
+   { MenuKey hand back (06-lib-wm-b).  We keep each menuId equal to its slot   }
+   { in myMenus[], so MenuCommand can 'case menu of' and index myMenus[menu]   }
+   { with the same value.  Menus are numbered FROM 1: only id 0 is reserved    }
+   { (the Filer-owned desktop menu, LIBWM-MENUS.TEXT:556-578); nothing         }
+   { reserves 1 -- the Clock's only menu IS menu 1 (03-app-template 3.1).      }
+   {                                                                            }
+   { THESE NUMBERS MUST MATCH THE MENU SECTION OF MINESWEEPER-ALERTS.TEXT.     }
+   { A separator line ('-') COUNTS as an item when numbering (06-lib-am,       }
+   { "the menu section and its item modifiers") -- that is why the item        }
+   { numbers below skip values.                                                 }
+   {---------------------------------------------------------------------------}
+
+   mFile = 1;                    { "File/Print" }
+      miAsideAll    = 1;         {   Set Aside Everything -> DoFilingCmd(cmdClosAll) }
+      miAside       = 2;         {   Set Aside            -> DoFilingCmd(cmdClose)   }
+      { item 3 is a '-' separator }
+      miPutAway     = 4;         {   Save & Put Away -> TellFiler(docClosd, docPutBack) }
+
+   mEdit = 2;                    { "Edit" -- live ONLY while a Field Editor    }
+      miUndo  = 1;               {   dialog is up; grayed the rest of the time }
+      { item 2 is a '-' separator }
+      miCut   = 3;               {   Cut/X   -> CutCopyField (06-lib-fe) }
+      miCopy  = 4;               {   Copy/C  -> CutCopyField             }
+      miPaste = 5;               {   Paste/V -> PasteField               }
+
+   mGame = 3;                    { "Game" }
+      miNewGame   = 1;           {   New Game/N }
+      { item 2 is a '-' separator }
+      miFlagMode  = 3;           {   Flag Mode/F -- CheckItem shows the state }
+      { item 4 is a '-' separator }
+      miBestTimes = 5;           {   Best Times ...       }
+      miResetBest = 6;           {   Reset Best Times ... }
+
+   mLevel = 4;                   { "Level" -- the current level is check-marked }
+      miBeginner     = 1;
+      miIntermediate = 2;
+      miExpert       = 3;
+      { item 4 is a '-' separator }
+      miCustom       = 5;        {   Custom Level ... }
+
+   lastMenu = 4;                 { highest menu number we install in the bar }
+
+   {---------------------------------------------------------------------------}
+   { Alerts and phrases.                                                        }
+   {                                                                            }
+   { EVERY user-visible string in this program lives in the phrase file        }
+   { (MINESWEEPER-ALERTS.TEXT, compiled by the Alert tool into <tool>PHRASE);  }
+   { none is a Pascal literal.  That is the LOS localisation model: ship a     }
+   { different phrase file, get a different language, same executable          }
+   { (06-lib-am).  Alert numbers must ascend in the file; #1 and #2 are        }
+   { REQUIRED by the format (#1 = fallback for an unknown number, #2 = the     }
+   { locked-in-cache "Swan Song" disk/memory alert).                            }
+   {---------------------------------------------------------------------------}
+
+   alertVerNum = 2;       { version stamp expected in the phrase file; a       }
+                          { mismatch is only warning -3076, but bump both      }
+                          { sides together when renumbering alerts (06-lib-am) }
+
+   alrtFallback  = 1;     { note    - "message not found" (required by format) }
+   alrtSwanSong  = 2;     { stop    - startup-disk trouble (required, cached)  }
+   alrtNewGame   = 10;    { caution - "Start a new game? ..." default OK       }
+   alrtWin       = 20;    { note    - "You swept all ^1 mines in ^2 seconds."  }
+   alrtBest      = 30;    { note    - best-times display, via ParamAlert       }
+   alrtResetBest = 40;    { caution - "Reset all best times?" default CANCEL   }
+   alrtBadValue  = 50;    { stop    - custom value out of range, two-stage:    }
+                          {           soft beep first, box on repeat           }
+
+   { "Get" phrases: number-only entries in the phrase file, one verbatim line  }
+   { each, fetched with GetAlert (06-lib-am).  They let non-alert UI text      }
+   { (dialog labels, etc.) live in the phrase file too.  901..909 are          }
+   { reserved for DTAlert's time fragments, so ours start at 910 (except the   }
+   { word-triples string, which nothing displays).                             }
+
+   phTriples     = 900;   { the Field Editor "word triples" string -- see      }
+                          { InitDialogs in MSDialog and 06-lib-fe (qualifies). }
+                          { The Calculator smuggles this string in as a menu   }
+                          { item (APHP-HP.TEXT:2005); a get-phrase is cleaner. }
+   phWidth       = 910;   { label of the custom dialog's width field   }
+   phHeight      = 911;   { label of the custom dialog's height field  }
+   phMines       = 912;   { label of the custom dialog's mines field   }
+   phCustomTitle = 913;   { title line of the Custom Level dialog      }
+   phNameTitle   = 914;   { title line of the new-record name dialog   }
+   phNoBest      = 915;   { best-times line shown for a level with no record }
+
+   {---------------------------------------------------------------------------}
+   { Fonts (family numbers from FontMgr, 06-lib-fm section 3.4).  On the Lisa  }
+   { each point size is its own family; TextSize is left at 0 = natural size.  }
+   {---------------------------------------------------------------------------}
+
+   fntCell   = tile12;    { cell digits 1..8: 12-point proportional, fits 14px }
+   fntStatus = tile18;    { the two 3-digit readouts: bigger, reads at a glance }
+   fntLabel  = tile12;    { dialog labels and field text }
+
+   {---------------------------------------------------------------------------}
+   { Private heap.  A static array handed to InitHeap (06-lib-qd-b, Storage):  }
+   { all our own dynamic allocations (menu data read by InitMP, the alert      }
+   { cache, Field Editor fields) come from here, NOT from the shared WM heap,  }
+   { so we cannot fragment communal memory (01-orientation section 3.3).       }
+   { 8000 integers = 16000 bytes, comfortably more than the alert cache        }
+   { (~3000 bytes, see MINESWEEPER-ALERTS.TEXT) plus menus and four fields.    }
+   {---------------------------------------------------------------------------}
+
+   maxHeap = 8000;
+
+type
+
+   {---------------------------------------------------------------------------}
+   { Game types                                                                 }
+   {---------------------------------------------------------------------------}
+
+   MSLevel = (lvBeginner, lvIntermediate, lvExpert, lvCustom);
+
+   MSState = (msFresh,     { board dealt, no cell revealed yet -- mines are    }
+                           { NOT placed yet either: first-click safety places  }
+                           { them after the first reveal (see MSGame)          }
+              msPlaying,   { at least one cell revealed, timer running         }
+              msWon,       { all safe cells revealed -- timer frozen           }
+              msLost);     { a mine was revealed -- timer frozen               }
+
+   MSCell = packed record
+      isMine     : boolean;      { true if this cell hides a mine              }
+      isRevealed : boolean;      { true once the player has opened it          }
+      isFlagged  : boolean;      { true while the player's flag sits on it     }
+      adjMines   : 0..15;        { number of mines in the 8 neighbours (0..8;  }
+                                 { the subrange is 0..15 so the packed field   }
+                                 { is a clean 4 bits)                          }
+   end;
+
+   { The document record.  THIS LIVES IN THE DATA SEGMENT: myDoc (below) is    }
+   { simply the segment's base address cast to this type, so every field       }
+   { written here is automatically persistent.  A data segment survives Set    }
+   { Aside and even a crash (the OS keeps the backing file), which is exactly  }
+   { how "Set Aside -> reopen resumes the same board mid-game" is implemented  }
+   { -- there is no explicit save step at all (01-orientation section 4,       }
+   { 05-os-syscalls section 4).                                                }
+
+   MSDoc = record
+      version    : integer;                 { = msDocVersion; guards stale/corrupt segments }
+      level      : MSLevel;                 { current level }
+      cols, rows : integer;                 { current board dimensions }
+      mineCount  : integer;                 { mines on the current board }
+      state      : MSState;                 { where the current game stands }
+      elapsed    : integer;                 { seconds played; frozen on win/loss.  }
+                                            { Persisted so a set-aside game        }
+                                            { resumes with its clock intact.       }
+      flagMode   : boolean;                 { true = plain clicks plant flags      }
+      flagsPlaced: integer;                 { flags currently on the board (drives }
+                                            { the mine counter readout)            }
+      cellsToGo  : integer;                 { unrevealed SAFE cells remaining;     }
+                                            { reaching 0 is the win condition      }
+      fatalCol   : integer;                 { the mine the player stepped on       }
+      fatalRow   : integer;                 { (0,0 = none); drawn highlighted      }
+      cells      : array [1..maxRows, 1..maxCols] of MSCell;
+                                            { the live board.  Sized for the       }
+                                            { LARGEST allowed board (30 x 18), not }
+                                            { the current one -- the segment is a  }
+                                            { fixed-size record.                   }
+      bestTime   : array [lvBeginner..lvExpert] of integer;  { seconds; noBest = none }
+      bestName   : array [lvBeginner..lvExpert] of Str255;   { who set each record    }
+      customW, customH, customM : integer;  { last Custom settings, re-offered      }
+                                            { as defaults next time                 }
+   end;
+
+   MSDocPtr = ^MSDoc;
+
+var
+
+   {---------------------------------------------------------------------------}
+   { The standard application globals (names follow the Calculator,            }
+   { APHP-HP.TEXT:366-416, so cross-reading the shipped source is easy).       }
+   {---------------------------------------------------------------------------}
+
+   theEvent  : EventRecord;      { the event most recently pulled from the WM  }
+                                 { queue -- filled by GetEvent (06-lib-wm-a)   }
+   myWindow  : WindowPtr;        { the window the Filer LENT us on fcNone;     }
+                                 { nil when we have none.  Never disposed --   }
+                                 { the Filer owns it (06-lib-fc).              }
+   toldToDie : boolean;          { set true by fcTerminate; the ONLY exit      }
+                                 { condition of the main loop                  }
+   myMenus   : array [1..lastMenu] of MenuInfo;
+                                 { menu descriptors, filled by InitMP from the }
+                                 { phrase file's menu section (06-lib-wm-b)    }
+   allAlerts : TAlertFile;       { handle to the loaded phrase file; the first }
+                                 { argument of every alert call (06-lib-am)    }
+   myZone    : array [0..maxHeap] of integer;
+                                 { storage backing the private heap zone       }
+
+   {---------------------------------------------------------------------------}
+   { Document state                                                             }
+   {---------------------------------------------------------------------------}
+
+   myDoc       : MSDocPtr;       { the data segment, seen as a document record }
+   segRefNum   : integer;        { the open segment's refnum (for Close/Flush) }
+   useDefaults : boolean;        { true only when Initialize just CREATED the  }
+                                 { segment (or found it corrupt): InitNewDoc   }
+                                 { then fills in defaults; otherwise myDoc^    }
+                                 { already holds restored state that must be   }
+                                 { resumed exactly as it was                   }
+
+   {---------------------------------------------------------------------------}
+   { Timing                                                                     }
+   {---------------------------------------------------------------------------}
+
+   startRef : longint;           { value of Time (hundredths of a second since }
+                                 { boot, 06-lib-wm-a) at the moment the        }
+                                 { current game's clock started, BACK-DATED by }
+                                 { the already-elapsed time on resume:         }
+                                 {    startRef := Time - elapsed*100           }
+                                 { so elapsed := (Time - startRef) div 100     }
+                                 { keeps counting seamlessly.  We derive       }
+                                 { elapsed time from the clock; we never count }
+                                 { loop iterations (they are not seconds).     }
+
+   lastClkTime : longint;        { 'when' of the previous buttonDown, and the  }
+   lastClkCol  : integer;        { cell it landed in -- double-click detection }
+   lastClkRow  : integer;        { for chording compares BOTH: two fast clicks }
+                                 { on different cells are not a double-click   }
+                                 { (theEvent.when and clickDelay share one     }
+                                 { clock, hundredths of a second, 06-lib-wm-a) }
+
+   {---------------------------------------------------------------------------}
+   { Bookkeeping                                                                }
+   {---------------------------------------------------------------------------}
+
+   initing : boolean;            { true while Initialize runs.  AlertFailed    }
+                                 { (the Alert Manager's errProc) treats a      }
+                                 { display failure as FATAL during startup     }
+                                 { (TellFiler initFailed + halt) but merely    }
+                                 { shrugs afterwards (03-app-template 10.3).   }
+
+   contentW : integer;           { current window content size, recomputed on  }
+   contentH : integer;           { every level change and fed to FolderSize    }
+
+
+{------------------------------------------------------------------------------}
+{  HandleFilerOp -- the tool-side Filer handshake, shared by the main event    }
+{  loop AND the modal dialog loops in MSDialog.                                 }
+{                                                                               }
+{  Why it lives here and not in the main program: a Filer command (including   }
+{  fcTerminate!) can arrive while a modal Field Editor dialog owns the event   }
+{  queue.  The dialog's nested loop must answer it with exactly the same       }
+{  protocol as the main loop -- an unanswered Filer op leaves the Filer        }
+{  blocked and freezes the whole desktop (01-orientation section 7.3).  Both   }
+{  loops therefore call this one routine.  Only fcNone (our launch) needs      }
+{  main-program machinery (building the window): for that case this routine    }
+{  just sets wantsOpen and the MAIN loop calls InitNewDoc; a dialog can never  }
+{  see fcNone because a dialog can only exist after the window is open.        }
+{------------------------------------------------------------------------------}
+
+procedure HandleFilerOp (var wantsOpen : boolean);
+
+
+IMPLEMENTATION
+
+procedure HandleFilerOp {var wantsOpen : boolean};
+{ The real parameter list is on the declaration above; repeating it in a      }
+{ comment is the Lisa Pascal convention for FORWARD/unit routines             }
+{ (03-app-template section 1, APHP-HP.TEXT:448).                              }
+var fx     : FilerExt;     { the unpacked "additional parameters" - 06-lib-fc }
+    err    : integer;      { FilerComm result codes (informational here)      }
+    osErr  : integer;      { OS result codes from Sched_Class / Close_DataSeg }
+    osErr2 : integer;
+begin
+   wantsOpen := false;
+
+   { A filerEvent's command is not in the event's main fields: it rides in    }
+   { userData as a heap handle.  GetAddParms copies it out and disposes the   }
+   { handle -- call it exactly once per event (06-lib-fc).                    }
+   GetAddParms(err, theEvent, fx);
+
+   { This is the TOOL version of the dispatch (03-app-template section 7.1,  }
+   { verified against the Calculator, APHP-HP.TEXT:3465-3514).  A tool has   }
+   { no documents: it accepts fcNone as its launch and refuses everything    }
+   { document-shaped.                                                         }
+   case fx.theFlrOp of
+
+      fcNone :
+         { The user pulled the TOOL itself onto the desktop -- this is our    }
+         { launch.  theEvent.who is the window the Filer is lending us.  No   }
+         { TellFiler reply is defined for fcNone (06-lib-fc); we just take    }
+         { the window and run.  The main loop does that via InitNewDoc.       }
+         wantsOpen := true;
+
+      fcResume :
+         { "Open this document" -- but a tool HAS no documents.  Refuse.      }
+         { (A document app would treat this as its real launch; the fcNone /  }
+         { fcResume inversion is THE difference between the two app kinds,    }
+         { 03-app-template section 1.1.)                                      }
+         TellFiler(err, docClosd, internalError, theEvent.who);
+
+      fcClose, fcSuspend, fcShred :
+         begin
+            { Put our one "document" (the game state) away.  There is        }
+            { nothing to write: myDoc^ IS the data segment, so every move    }
+            { the player made is already in it.  We keep the segment at full }
+            { size in all three cases -- it also holds the best times, which }
+            { must survive (the Calculator Size_DataSegs its segment down    }
+            { here, APHP-HP.TEXT:3490, but its segment is large and ours is  }
+            { only ~2.5 KB; releasing a couple of disk blocks is not worth   }
+            { the code).  The window goes back to the Filer -- we only       }
+            { forget our pointer to it, we never DisposeFolder a loan        }
+            { (06-lib-fc, libfc-FILERCOMM.TEXT:90).                          }
+            myWindow := nil;
+            TellFiler(err, docClosd, allOK, theEvent.who)
+         end;
+
+      fcCopy, fcPut :
+         { Duplicate / relocate a document -- meaningless for a tool.        }
+         TellFiler(err, docNotXfered, internalError, theEvent.who);
+
+      fcDfClose :
+         { "Close this diskfile, a diskette is leaving."  We hold no         }
+         { diskfiles open (the data segment is not ours to close here, and   }
+         { the phrase file is managed by the Alert Manager), so agree.       }
+         TellFiler(err, dfClosed, allOK, theEvent.who);
+
+      fcTerminate :
+         begin
+            { Die.  The reply to fcTerminate is NOT a TellFiler -- it is the }
+            { ImDying call our SYS_TERMINATE handler makes on the way out    }
+            { (06-lib-fc).  Here we only end the main loop and release the   }
+            { data segment.  Close_DataSeg flushes the segment to its        }
+            { backing file, which is what makes the state reappear on the    }
+            { next launch.                                                   }
+            toldToDie := true;
+
+            { Close_DataSeg can block on disk I/O, and a WM-launched app     }
+            { runs NON-preemptive by default; a non-preemptive process that  }
+            { blocks would stall the scheduler that services its own I/O.    }
+            { So we open a temporary preemptive window around the call:      }
+            { Sched_Class(false) = "make me preemptible", then restore.      }
+            { (05-os-syscalls section 3, Sched_Class -- the flag is literal  }
+            { and the calls nest.)                                           }
+            Sched_Class(osErr, false);
+            Close_DataSeg(osErr2, segRefNum);
+            Sched_Class(osErr, true)
+         end;
+
+      otherwise
+         { fcPrint and the catalog queries (fcNameToPrefix, fcPrefixToName,  }
+         { fcDupIcon, fcMakeTool) never arrive at an ordinary tool           }
+         { (06-lib-fc section 2.3); if one somehow does, ignoring it is the  }
+         { safe answer -- no reply is defined for them.                      }
+
+   end  { case }
+end;
+
+end.
