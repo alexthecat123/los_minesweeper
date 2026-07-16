@@ -43,7 +43,7 @@ uses (*$U UnitStd.obj *)        UnitStd,     { base types                - 06-li
      (*$U FEdec.obj *)          FEdec,       { field types (FETerminate lives on them) }
      (*$U fld.obj *)            fieldedit,   { FETerminate               - 06-lib-fe   }
      (*$U SysCall.obj *)        SysCall,     { processes, data segs, exceptions - 05-os-syscalls }
-     (*$U wm.events.obj *)      Events,      { GetEvent, EventAvail, ImActive, Time - 06-lib-wm-a }
+     (*$U wm.events.obj *)      Events,      { GetEvent, EventAvail, ImActive, activeFolder - 06-lib-wm-a }
      (*$U wm.folders.obj *)     Folders,     { OpenWm, TakeControl, FolderSize ... - 06-lib-wm-a }
      (*$U wm.menus.obj *)       Menus,       { MenuSelect, MenuKey, CheckItem - 06-lib-wm-b }
      (*$U AlertMgr.obj *)       AlertMgr,    { InitMP, alerts            - 06-lib-am   }
@@ -196,11 +196,12 @@ begin
 end;
 
 {------------------------------------------------------------------------------}
-{  UpdateElapsed -- bring myDoc^.elapsed up to date from the wall clock.      }
-{  elapsed = (Time - startRef) div 100: Time is hundredths of a second since  }
-{  boot (06-lib-wm-a Time) and startRef was set (or back-dated, on resume)    }
-{  when the game's clock started.  We DERIVE time; we never count loop        }
-{  iterations, which are not seconds.  Pegs at 999 like the original.         }
+{  UpdateElapsed -- bring myDoc^.elapsed up to date from the real clock.      }
+{  elapsed = ClockSecs - startRef, both in seconds off the battery-backed     }
+{  clock/calendar (MSGlobals, ClockSecs -- read that first; it is where the   }
+{  seconds come from and why they come from there).  startRef was set, or     }
+{  back-dated, when the game's clock started.  We DERIVE time; we never count }
+{  loop iterations, which are not seconds.  Pegs at 999 like the original.    }
 {  Only a running game ticks: msFresh has not started, msWon/msLost are       }
 {  frozen at their final second.                                              }
 {------------------------------------------------------------------------------}
@@ -209,8 +210,15 @@ procedure UpdateElapsed;
 var secs : longint;
 begin
    if myDoc^.state = msPlaying then begin
-      secs := (Time - startRef) div 100;
-      if secs > maxTimer then secs := maxTimer;
+      secs := ClockSecs - startRef;
+      { ClockSecs counts from the start of the GMT year, so it runs backwards  }
+      { once a year, at midnight GMT on New Year's Eve, and a game running     }
+      { across that moment would compute a negative age.  Peg such a game at   }
+      { 999 rather than do calendar arithmetic to recover a real figure: the   }
+      { readout has three digits, any game old enough to span the rollover is  }
+      { long past 999 anyway, and this way the one case that cannot be tested  }
+      { until next New Year is also the one case that cannot be wrong.         }
+      if (secs < 0) or (secs > maxTimer) then secs := maxTimer;
       myDoc^.elapsed := secs
    end
 end;
@@ -452,7 +460,7 @@ end;
 {  5.4, verbatim:                                                              }
 {                                                                              }
 {     buttonDown in a covered cell:                                            }
-{        Option held (theEvent.codeKey) or Flag Mode on  -> toggle flag        }
+{        Apple (or Option) held, or Flag Mode on         -> toggle flag        }
 {        else                                            -> reveal             }
 {     buttonDown in a revealed number:                                         }
 {        double-click (same cell, within clickDelay) and                       }
@@ -492,11 +500,20 @@ begin
 
    if not myDoc^.cells[r, c].isRevealed then begin
 
-      if theEvent.codeKey or myDoc^.flagMode then begin
-         { Option-click (codeKey is the Option key, 06-lib-wm-a section 1.1) }
-         { -- or any click in Flag Mode -- plants or lifts a flag.           }
+      if theEvent.appleKey or theEvent.codeKey or myDoc^.flagMode then begin
+         { Apple-click -- or any click in Flag Mode -- plants or lifts a flag. }
+         {                                                                     }
+         { appleKey is the Apple/Command key and codeKey is the OPTION key     }
+         { (LIBWM-EVENTS.TEXT:98-102 names all five modifier fields; the       }
+         { manual's "codeKey" gloss is easy to misread as "command key").      }
+         { Apple is the one to reach for by hand -- it is the modifier the     }
+         { Lisa uses for "do the other thing" everywhere else -- and Option is }
+         { kept as a synonym because it costs a single test and someone will   }
+         { try it.  Both flags are filled in on a buttonDown, not just on      }
+         { keystrokes: the WM samples the whole keyboard state when it builds  }
+         { any event (LIBWM-EVENTS.TEXT:507-522).                              }
          ToggleFlag(c, r);
-         DrawCell(c, r);                 { one cell changed ... }
+         DrawDirtyCells;                 { one cell changed ... }
          DrawCounter                 { ... and the count readout }
       end
       else begin
@@ -511,7 +528,7 @@ begin
             { starts: on the first REVEAL, not on New Game.                   }
             PlaceMines(c, r);
             myDoc^.elapsed := 0;
-            startRef := Time;            { the clock's zero point - 06-lib-wm-a Time }
+            startRef := ClockSecs;       { the clock's zero point - MSGlobals }
             DrawTimer
          end;
 
@@ -521,10 +538,11 @@ begin
          if myDoc^.state = msLost then
             DoLose                       { redraws board + face, beeps }
          else begin
-            { A reveal can flood dozens of cells; repaint the board rather    }
-            { than track which ones (DrawBoard repaints every pixel of every  }
-            { cell identically, so untouched cells do not flicker -- MSDraw). }
-            DrawBoard;
+            { A reveal can flood dozens of cells -- and just as often opens    }
+            { exactly one.  RevealCell marked every cell it touched, so paint  }
+            { those and leave the rest of the board alone; the cost of a move  }
+            { is the size of the move.                                         }
+            DrawDirtyCells;
             if myDoc^.state = msWon then DoWin
                                     else DrawFace(false)   { calm again }
          end;
@@ -546,7 +564,7 @@ begin
             DrawTimer
          end
          else begin
-            DrawBoard;                   { the chord may have opened a region }
+            DrawDirtyCells;              { the chord may have opened a region }
             if myDoc^.state = msWon then begin
                DoWin;
                DrawTimer
@@ -600,12 +618,12 @@ begin
       { myDoc^ already holds the reopened segment: the exact board, flags,    }
       { timer and record book from last time -- Set Aside and reopen land     }
       { here, mid-game if that is how it was left.  The ONLY thing to redo    }
-      { is the clock's reference point, because startRef is wall-clock        }
-      { ("hundredths since boot") and this may be a different boot: back-     }
-      { date it so the timer CONTINUES from the saved second rather than     }
-      { restarting -- time spent set aside costs the player nothing.          }
+      { is the clock's reference point: startRef is a moment in time, and     }
+      { this is a later moment.  Back-date it by the seconds already played   }
+      { so the timer CONTINUES from the saved second rather than restarting   }
+      { -- time spent set aside costs the player nothing.                     }
       if myDoc^.state = msPlaying then
-         startRef := Time - myDoc^.elapsed * 100
+         startRef := ClockSecs - myDoc^.elapsed
    end;
 
    ComputeLayout;                        { contentW/H for the restored level }
@@ -614,7 +632,29 @@ begin
    ValidRect(myWindow^.portRect);        { content is about to be fresh: no     }
                                          { update event needed for it           }
    doUpdateEvent(false, myWindow);       { the one forced full paint }
-   RefreshMenuState
+
+   { THE MENU BAR AT LAUNCH.  No folderActivate event arrives for this first    }
+   { activation: the Filer hands us an already-ACTIVE window, so the activate   }
+   { handshake has happened before we ever see the fcNone.  Nothing else will   }
+   { call PutUpMenus until the user switches away and back -- so we must put    }
+   { the menus up here ourselves, or the bar stays empty.  (The WM cleared it   }
+   { during the switch: its lastMenu is 0, and DrawMenuBar draws NO titles at   }
+   { all when lastMenu = 0 -- not even the Filer's desk menu, which is why an   }
+   { app that forgets this step gets a blank bar whose invisible desk menu      }
+   { still pulls down.  LIBWM-MENUS.TEXT:292-350.)                              }
+   {                                                                            }
+   { The activeFolder test is the same one the Calculator makes on fcNone       }
+   { (APHP-HP.TEXT:3474, 'if activeFolder = myWindow then goto 2', jumping into }
+   { its folderActivate arm) and the Clock's (APCL-CLOCK.TEXT:1675).  If we are }
+   { NOT the active folder, a real folderActivate will arrive later and put the }
+   { menus up then; TakeWindow above is what makes the test able to succeed at  }
+   { all (it re-points the window at us, and a window that is the activeFolder  }
+   { drags activeProcess -- and hence ImActive, which DrawMenuBar requires --   }
+   { along with it: LIBWM-WINDOWS.TEXT:277, SetActWindow).                      }
+   if activeFolder = myWindow then
+      PutUpMenus                         { calls RefreshMenuState itself }
+   else
+      RefreshMenuState                   { menus are not up; keep their state true }
 end;
 
 {------------------------------------------------------------------------------}
@@ -867,6 +907,7 @@ begin
    lastClkTime := 0;
    lastClkCol  := 0;
    lastClkRow  := 0;
+   ClearDirty;              { no cell is owed a repaint before a board exists }
 
    { (3) The private heap, carved out of the static myZone array.  Everything }
    { we allocate (menu blocks, the alert cache, Field Editor fields) lives    }

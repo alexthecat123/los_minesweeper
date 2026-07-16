@@ -78,16 +78,25 @@ function PointToCell (pt : Point; var c, r : integer) : boolean;
 { press feedback.                                                             }
 procedure FaceRect (var box : Rect);
 
-{ DrawCell -- repaint one cell from the document state.  The cheap targeted   }
-{ redraw used for flag toggles; every path through it paints EVERY pixel of   }
-{ the cell, so no separate erase is needed and unchanged cells repaint        }
-{ identically (i.e. flicker-free).                                            }
+{ DrawCell -- repaint one cell from the document state.  Every path through   }
+{ it paints EVERY pixel of the cell, so no separate erase is needed and a     }
+{ cell that has not changed repaints identically (i.e. flicker-free).  This   }
+{ is the unit of work both DrawDirtyCells and DrawBoard are made of.          }
 procedure DrawCell (c, r : integer);
 
-{ DrawBoard -- repaint every cell plus the 1-pixel frame.  Used after         }
-{ anything that can change many cells at once (reveal flood, chord, new       }
-{ game, win, loss).  540 cells of rectangle fills is well within a 68000's    }
-{ patience for a turn-based game.                                             }
+{ DrawDirtyCells -- repaint exactly the cells MSGame marked with MarkDirty    }
+{ since the last repaint, and clear the marks.  This is the normal way the    }
+{ board is updated after a move: a reveal that opens three cells costs three  }
+{ cells of drawing.  Reach for DrawBoard only when something really did       }
+{ change the whole board.                                                     }
+procedure DrawDirtyCells;
+
+{ DrawBoard -- repaint every cell plus the 1-pixel frame.  Used when the      }
+{ whole board genuinely changes: a new game, or a loss (which exposes every   }
+{ mine and X's out every wrong flag -- changes MSGame does not model as cell  }
+{ state at all, so the dirty list cannot see them).  540 cells of QuickDraw   }
+{ takes a visible moment on a 68000, which is precisely why the ordinary      }
+{ move goes through DrawDirtyCells instead.                                   }
 procedure DrawBoard;
 
 { DrawCounter -- the left-hand 3-digit readout: mines minus flags.            }
@@ -452,6 +461,30 @@ begin
 end;
 
 {------------------------------------------------------------------------------}
+procedure DrawDirtyCells;
+var c, r : integer;
+begin
+   { Scanning the array is not the expense -- 540 boolean tests are nothing.   }
+   { The expense is DrawCell, and this loop calls it only for cells that       }
+   { actually changed.  The marks are cleared as we go, so a cell is never     }
+   { drawn twice for one change.                                               }
+   if myWindow = nil then begin
+      { No window to draw on.  Drop the marks anyway: they describe a screen   }
+      { that no longer exists, and when a window comes back it arrives with a  }
+      { full repaint (InitNewDoc / folderUpdate), not with these.              }
+      ClearDirty;
+      exit(DrawDirtyCells)
+   end;
+   SetPort(myWindow);
+   for r := 1 to myDoc^.rows do
+      for c := 1 to myDoc^.cols do
+         if dirtyCell[r, c] then begin
+            dirtyCell[r, c] := false;
+            DrawCell(c, r)
+         end
+end;
+
+{------------------------------------------------------------------------------}
 procedure DrawBoard;
 var c, r  : integer;
     frame : Rect;
@@ -462,6 +495,11 @@ begin
    for r := 1 to myDoc^.rows do
       for c := 1 to myDoc^.cols do
          DrawCell(c, r);
+
+   { Every cell is now on the screen exactly as the document describes it, so  }
+   { nothing is owed a repaint.  Clearing here is what lets a caller reach     }
+   { for DrawBoard without also having to think about the dirty list.          }
+   ClearDirty;
 
    { The 1-pixel black frame, one pixel OUTSIDE the cells, so the board sits  }
    { on the window instead of floating.  FrameRect draws INSIDE its rect,     }
@@ -529,13 +567,26 @@ begin
       SetRect(ii, cx - 2, cy + 1, cx + 2, cy + 4);  FrameOval(ii)
    end
    else if myDoc^.state = msLost then begin
-      { DEAD -- X eyes, flat mouth.  Each X is two crossed 3-pixel strokes.   }
+      { DEAD -- X eyes and a frown.  Each X is two crossed 3-pixel strokes.   }
       PenNormal;
       MoveTo(cx - 6, cy - 4);  LineTo(cx - 3, cy - 2);
       MoveTo(cx - 3, cy - 4);  LineTo(cx - 6, cy - 2);
       MoveTo(cx + 3, cy - 4);  LineTo(cx + 6, cy - 2);
       MoveTo(cx + 6, cy - 4);  LineTo(cx + 3, cy - 2);
-      MoveTo(cx - 4, cy + 3);  LineTo(cx + 4, cy + 3)
+      { The frown is the smile's mirror image: the TOP half of a mouth oval    }
+      { instead of the bottom, so it bows upward.  Angles run clockwise from   }
+      { 12 o'clock, so (270, 180) sweeps 9 -> 12 -> 3 (06-lib-qd-a section     }
+      { 12), the same convention the smile's (90, 180) uses.                   }
+      {                                                                        }
+      { It sits one pixel higher and one pixel narrower each side than the     }
+      { smile does (band cy..cy+3, ends at cx +-3, against the smile's         }
+      { cy+1..cy+4 and cx +-4).  A frown's ENDS are its lowest points, where a }
+      { smile's are its highest, so mirroring the smile's rectangle exactly    }
+      { would drop the ends to the smile's deepest row and crowd them against  }
+      { the face outline -- the corners of the mouth are the part that has to  }
+      { be given room, and raising the whole mouth is what gives it to them.   }
+      SetRect(ii, cx - 3, cy, cx + 3, cy + 6);
+      FrameArc(ii, 270, 180)
    end
    else if myDoc^.state = msWon then begin
       { COOL -- sunglasses: a filled band across both eyes with a bridge,     }

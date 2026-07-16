@@ -94,7 +94,7 @@ procedure RevealCell (c, r : integer);
 
 { ToggleFlag -- plant or lift a flag on covered cell (c, r).  Revealed cells  }
 { cannot be flagged.  Keeps flagsPlaced current (the mine-counter readout is  }
-{ mineCount - flagsPlaced).  Called by the click handler (Option-click, or    }
+{ mineCount - flagsPlaced).  Called by the click handler (Apple-click, or     }
 { any click while Flag Mode is on).                                           }
 
 procedure ToggleFlag (c, r : integer);
@@ -185,7 +185,13 @@ begin
             cells[r, c].isFlagged  := false;
             cells[r, c].adjMines   := 0
          end
-   end
+   end;
+
+   { Every cell changed, so marking them individually would be pointless: the  }
+   { caller repaints the whole window anyway (the window is about to change    }
+   { size).  Drop the marks instead, so no cell from the PREVIOUS game is      }
+   { still owed a repaint after this one.                                      }
+   ClearDirty
 end;
 
 
@@ -276,6 +282,12 @@ begin
          fatalCol := c;
          fatalRow := r;
          state := msLost;
+         MarkDirty(c, r);
+         { Only this cell is marked, but a loss changes far more than one cell }
+         { (every hidden mine appears, every wrong flag gets an X): the caller }
+         { redraws the whole board for a loss and the marks are irrelevant.    }
+         { We mark anyway so that this routine's contract holds without an     }
+         { exception -- "a cell I changed is always marked".                   }
          exit(RevealCell)
       end;
 
@@ -286,6 +298,7 @@ begin
       { ever pushed.                                                          }
       cells[r, c].isRevealed := true;
       cellsToGo := cellsToGo - 1;
+      MarkDirty(c, r);
       workTop := 0;
       if cells[r, c].adjMines = 0 then begin
          workTop := 1;  workC[1] := c;  workR[1] := r
@@ -310,6 +323,7 @@ begin
                         (not cells[rr + dr, cc + dc].isFlagged) then begin
                         cells[rr + dr, cc + dc].isRevealed := true;
                         cellsToGo := cellsToGo - 1;
+                        MarkDirty(cc + dc, rr + dr);
                         if cells[rr + dr, cc + dc].adjMines = 0 then begin
                            { Another opening cell: queue it so ITS neighbours }
                            { get opened too.                                  }
@@ -328,7 +342,13 @@ begin
          for rr := 1 to rows do
             for cc := 1 to cols do
                if cells[rr, cc].isMine then
-                  cells[rr, cc].isFlagged := true;
+                  if not cells[rr, cc].isFlagged then begin
+                     cells[rr, cc].isFlagged := true;
+                     MarkDirty(cc, rr)   { a flag just appeared on it }
+                     { Mines the player had ALREADY flagged are left alone,   }
+                     { and unmarked: their appearance does not change, so     }
+                     { repainting them would be work for nothing.             }
+                  end;
          flagsPlaced := mineCount
       end
    end
@@ -341,6 +361,7 @@ begin
    with myDoc^ do begin
       if (state = msWon) or (state = msLost) then exit(ToggleFlag);  { board is inert }
       if cells[r, c].isRevealed then exit(ToggleFlag);   { can't flag an open cell }
+      MarkDirty(c, r);                                   { either way it changes }
       if cells[r, c].isFlagged then begin
          cells[r, c].isFlagged := false;
          flagsPlaced := flagsPlaced - 1
