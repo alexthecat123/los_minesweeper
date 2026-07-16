@@ -530,10 +530,14 @@ end;
 
 {------------------------------------------------------------------------------}
 {  DoBoardClick -- a buttonDown in our window: the input rules of section     }
-{  5.4, verbatim:                                                              }
+{  5.4, with one deliberate departure.  5.4 says "toggle flag"; the gesture    }
+{  instead walks the ORIGINAL's three-state mark cycle, which is what the      }
+{  Windows game does and what a player coming from it expects.  The rules as   }
+{  they now stand:                                                             }
 {                                                                              }
 {     a click in a covered cell:                                               }
-{        Apple (or Option) held, or Flag Mode on         -> toggle flag        }
+{        Apple (or Option) held, or Flag Mode on         -> cycle the mark     }
+{           (clean -> flag -> "?" -> clean, as the original does)              }
 {        else                                            -> reveal             }
 {     a click in a revealed number:                                            }
 {        double-click (same cell, within clickDelay) and                       }
@@ -550,19 +554,19 @@ end;
 {  game with no way to take it back.                                           }
 {                                                                              }
 {  The MODIFIERS, though, are read from the press: theEvent still holds the    }
-{  buttonDown, so a flag stays a flag even if Apple is let go during the       }
-{  hold.  The key you were holding when you committed to the gesture is the    }
-{  one you meant.                                                              }
+{  buttonDown, so a mark gesture stays a mark gesture even if Apple is let go  }
+{  during the hold.  The key you were holding when you committed to the        }
+{  gesture is the one you meant.                                               }
 {                                                                              }
-{  Which is also what decides whether the face worries: a FLAG worries no      }
-{  one.  Planting a flag cannot lose the game -- it is a note the player       }
-{  writes to themselves, and it is always undoable -- so the face has nothing  }
-{  to fear and does not pretend otherwise.  Only a reveal is a gamble.  (The   }
-{  original worries on the left button and stays calm on the right; Apple and  }
-{  Flag Mode are our right button.)  A press on an already-open number DOES    }
-{  worry, though, even when it opens nothing: it may yet turn out to be half   }
-{  of a chord, which is a reveal like any other -- and the original worries    }
-{  there too.                                                                  }
+{  Which is also what decides whether the face worries: a MARK worries no      }
+{  one.  Marking a cell cannot lose the game -- flag or "?", it is a note the  }
+{  player writes to themselves, and the next gesture walks it around the       }
+{  cycle -- so the face has nothing to fear and does not pretend otherwise.    }
+{  Only a reveal is a gamble.  (The original worries on the left button and    }
+{  stays calm on the right; Apple and Flag Mode are our right button.)  A      }
+{  press on an already-open number DOES worry, though, even when it opens      }
+{  nothing: it may yet turn out to be half of a chord, which is a reveal like  }
+{  any other -- and the original worries there too.                            }
 {------------------------------------------------------------------------------}
 
 procedure DoBoardClick;
@@ -627,7 +631,10 @@ begin
    if not myDoc^.cells[r, c].isRevealed then begin
 
       if theEvent.appleKey or theEvent.codeKey or myDoc^.flagMode then begin
-         { Apple-click -- or any click in Flag Mode -- plants or lifts a flag. }
+         { Apple-click -- or any click in Flag Mode -- advances the cell's     }
+         { mark one step: clean -> flag -> "?" -> clean (CycleMark, MSGame).   }
+         { One gesture, repeated, walks the whole cycle, so a mis-flag is      }
+         { two more clicks away from gone and there is nothing new to learn.   }
          {                                                                     }
          { appleKey is the Apple/Command key and codeKey is the OPTION key     }
          { (LIBWM-EVENTS.TEXT:98-102 names all five modifier fields; the       }
@@ -638,11 +645,14 @@ begin
          { try it.  Both flags are filled in on a buttonDown, not just on      }
          { keystrokes: the WM samples the whole keyboard state when it builds  }
          { any event (LIBWM-EVENTS.TEXT:507-522).                              }
-         ToggleFlag(c, r);
+         CycleMark(c, r);
          DrawDirtyCells;                 { one cell changed ... }
-         DrawCounter                     { ... and the count readout.  The     }
-                                         { face is untouched: a flag gesture   }
-                                         { never worried it in the first place }
+         DrawCounter                     { ... and the count readout, which    }
+                                         { moves on the steps into and out of  }
+                                         { the flag and not on the "?" step.   }
+                                         { The face is untouched: a mark       }
+                                         { gesture never worried it in the     }
+                                         { first place                         }
       end
       else begin
          { A reveal -- the move the worried face has been waiting on.         }
@@ -869,6 +879,8 @@ begin
    SetRect(frame, 0, 0, contentW, contentH);
    pic := OpenPicture(frame);            { start recording (pen hides) }
    RenderImage(myWindow);                { the full repaint, captured as opcodes }
+   FrameImage(myWindow);                 { ... and box it: on paper or pasted    }
+                                         { there is no window frame to bound it  }
    ClosePicture;                         { stop recording (pen shows) }
 
    PutGrScrap(pic, scrErr);              { publish: ScrapUG joins CurrScrapSet }
@@ -883,7 +895,7 @@ begin
                                          { an empty visRgn clips it all away);  }
                                          { later damage comes back to us as     }
                                          { folderUpdates on scrapFolder, which  }
-                                         { DrawScrapWindow services             }
+                                         { DrawWindowScrap services             }
    SetPort(savePort)
 end;
 
@@ -1008,6 +1020,8 @@ begin
    SetRect(frame, 0, 0, contentW, contentH);
    pic := OpenPicture(frame);
    RenderImage(myWindow);
+   FrameImage(myWindow);                 { the box travels with the picture, so  }
+                                         { it scales onto the page with it       }
    ClosePicture;
 
    SetHeap(saveHz);                      { our allocations are ours again }
@@ -1260,9 +1274,9 @@ begin
          { Some window of ours was uncovered; redraw just the damage through  }
          { the update bracket.  "Ours" includes the scrap window while we own }
          { the scrap -- and that one shows the SCRAP's contents, never the    }
-         { live board (DrawScrapWindow, MSDraw).                              }
+         { live board (DrawWindowScrap, MSDraw).                              }
          if theEvent.who = scrapFolder then
-            DrawScrapWindow(true)
+            DrawWindowScrap(true)
          else
             doUpdateEvent(true, theEvent.who);
 

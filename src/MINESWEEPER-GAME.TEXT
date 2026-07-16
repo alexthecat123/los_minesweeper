@@ -95,12 +95,18 @@ procedure PlaceMines (avoidC, avoidR : integer);
 procedure RevealCell (c, r : integer);
 
 
-{ ToggleFlag -- plant or lift a flag on covered cell (c, r).  Revealed cells  }
-{ cannot be flagged.  Keeps flagsPlaced current (the mine-counter readout is  }
-{ mineCount - flagsPlaced).  Called by the click handler (Apple-click, or     }
-{ any click while Flag Mode is on).                                           }
+{ CycleMark -- advance covered cell (c, r)'s mark one step around the         }
+{ original's three-state cycle:                                               }
+{                                                                             }
+{     clean  --gesture->  flag  --gesture->  "?"  --gesture->  clean  ...     }
+{                                                                             }
+{ Revealed cells cannot be marked.  Keeps flagsPlaced current (the mine-      }
+{ counter readout is mineCount - flagsPlaced), which means the counter gives  }
+{ the flag back the moment the flag becomes a query -- a query claims no      }
+{ mine.  Called by the click handler (Apple-click, or any click while Flag    }
+{ Mode is on).                                                                }
 
-procedure ToggleFlag (c, r : integer);
+procedure CycleMark (c, r : integer);
 
 
 { AdjFlags -- how many of (c, r)'s 8 neighbours currently carry a flag.       }
@@ -185,7 +191,7 @@ begin
          for c := 1 to maxCols do begin
             cells[r, c].isMine     := false;
             cells[r, c].isRevealed := false;
-            cells[r, c].isFlagged  := false;
+            cells[r, c].playerMark := pmNone;
             cells[r, c].adjMines   := 0
          end
    end;
@@ -270,8 +276,9 @@ begin
       { chorded cells turns out to be a mine.                                 }
       if (state = msWon) or (state = msLost) then exit(RevealCell);
 
-      { Flags protect; open cells are already open. }
-      if cells[r, c].isFlagged then exit(RevealCell);
+      { Flags protect; open cells are already open.  A "?" protects NOTHING:  }
+      { it is a note, not a claim, and the original opens straight through it. }
+      if cells[r, c].playerMark = pmFlag then exit(RevealCell);
       if cells[r, c].isRevealed then exit(RevealCell);
 
       if cells[r, c].isMine then begin
@@ -294,17 +301,27 @@ begin
          { LIKE did -- so nothing else in this routine would ever mark them,   }
          { and this is the one place that knows the loss just happened.        }
          {                                                                     }
-         { Exactly which cells?  The ones where isMine and isFlagged DISAGREE. }
-         { An unflagged mine was a blank cover a moment ago and is a mine now; }
-         { a flagged blank was a flag and is now a mine with a line through    }
-         { it.  The other two combinations are already telling the truth: a    }
-         { correctly flagged mine still shows the same flag it showed before   }
-         { the loss, and a plain covered blank stays a plain covered blank.    }
-         { Leaving those two alone is what keeps this cheap -- on a full       }
-         { Expert board it is 99 mines and a few bad flags, not 480 cells.     }
+         { Exactly which cells?  The ones where isMine and "carries a FLAG"    }
+         { disagree.  An unflagged mine was a blank cover a moment ago and is  }
+         { a mine now; a flagged blank was a flag and is now a mine with a     }
+         { line through it.  The other two combinations are already telling    }
+         { the truth: a correctly flagged mine still shows the same flag it    }
+         { showed before the loss, and a plain covered blank stays a plain     }
+         { covered blank.  Leaving those two alone is what keeps this cheap -- }
+         { on a full Expert board it is 99 mines and a few bad flags, not 480  }
+         { cells.                                                              }
+         {                                                                     }
+         { The query mark needs no case of its own, which is the whole reason  }
+         { the test reads "= pmFlag" rather than "<> pmNone".  A "?" on a mine }
+         { counts as unflagged here and so is repainted -- correctly, since    }
+         { the mine now shows through it.  A "?" on a blank counts as          }
+         { unflagged too and so is left alone -- also correct: it was never a  }
+         { claim that could BE wrong, so the loss leaves it standing as the    }
+         { open question it always was.  (The original does the same: only     }
+         { flags get X'd out.)                                                 }
          for rr := 1 to rows do
             for cc := 1 to cols do
-               if cells[rr, cc].isMine <> cells[rr, cc].isFlagged then
+               if cells[rr, cc].isMine <> (cells[rr, cc].playerMark = pmFlag) then
                   MarkDirty(cc, rr);
          exit(RevealCell)
       end;
@@ -314,7 +331,10 @@ begin
       { not recursion).  Invariant: a cell is pushed at most once, because   }
       { it is marked isRevealed at push time, and only unrevealed cells are  }
       { ever pushed.                                                          }
+      { The cell may have carried a "?" (a query never blocked this reveal);  }
+      { it is answered now, so the mark goes.                                 }
       cells[r, c].isRevealed := true;
+      cells[r, c].playerMark := pmNone;
       cellsToGo := cellsToGo - 1;
       MarkDirty(c, r);
       workTop := 0;
@@ -332,14 +352,19 @@ begin
          { sweep cannot lose the game.  Flags CAN sit on such cells (the     }
          { player was wrong); the classic rule is that the flood lifts       }
          { nothing -- flagged cells stay closed, which is why we skip them.  }
+         { A "?" is not a flag and does not stop the flood: the cell opens,  }
+         { and its mark goes with it (nothing draws a mark on an open cell,  }
+         { but leaving one behind in the data would be a lie about a cell    }
+         { the player can no longer be unsure about).                        }
          for dr := -1 to 1 do
             for dc := -1 to 1 do
                if (dc <> 0) or (dr <> 0) then
                   if (cc + dc >= 1) and (cc + dc <= cols) and
                      (rr + dr >= 1) and (rr + dr <= rows) then
                      if (not cells[rr + dr, cc + dc].isRevealed) and
-                        (not cells[rr + dr, cc + dc].isFlagged) then begin
+                        (cells[rr + dr, cc + dc].playerMark <> pmFlag) then begin
                         cells[rr + dr, cc + dc].isRevealed := true;
+                        cells[rr + dr, cc + dc].playerMark := pmNone;
                         cellsToGo := cellsToGo - 1;
                         MarkDirty(cc + dc, rr + dr);
                         if cells[rr + dr, cc + dc].adjMines = 0 then begin
@@ -360,8 +385,11 @@ begin
          for rr := 1 to rows do
             for cc := 1 to cols do
                if cells[rr, cc].isMine then
-                  if not cells[rr, cc].isFlagged then begin
-                     cells[rr, cc].isFlagged := true;
+                  if cells[rr, cc].playerMark <> pmFlag then begin
+                     { Clean cover or a "?" -- either way a flag lands on it,  }
+                     { and the "?" the player never resolved is answered for   }
+                     { them.                                                   }
+                     cells[rr, cc].playerMark := pmFlag;
                      MarkDirty(cc, rr)   { a flag just appeared on it }
                      { Mines the player had ALREADY flagged are left alone,   }
                      { and unmarked: their appearance does not change, so     }
@@ -374,23 +402,38 @@ end;
 
 
 {------------------------------------------------------------------------------}
-procedure ToggleFlag {c, r : integer};
+procedure CycleMark {c, r : integer};
 begin
    with myDoc^ do begin
-      if (state = msWon) or (state = msLost) then exit(ToggleFlag);  { board is inert }
-      if cells[r, c].isRevealed then exit(ToggleFlag);   { can't flag an open cell }
-      MarkDirty(c, r);                                   { either way it changes }
-      if cells[r, c].isFlagged then begin
-         cells[r, c].isFlagged := false;
-         flagsPlaced := flagsPlaced - 1
-      end
-      else begin
-         cells[r, c].isFlagged := true;
-         flagsPlaced := flagsPlaced + 1
-         { No cap on flags: the player may plant more flags than there are    }
-         { mines, and the mine counter (mineCount - flagsPlaced) then goes    }
-         { negative, exactly as in the original.  The counter drawing code    }
-         { clamps the DISPLAY, not the count.                                 }
+      if (state = msWon) or (state = msLost) then exit(CycleMark);  { board is inert }
+      if cells[r, c].isRevealed then exit(CycleMark);    { can't mark an open cell }
+      MarkDirty(c, r);                                   { every step changes it }
+
+      { The cycle, in the order the original walks it.  flagsPlaced tracks the }
+      { flags ONLY -- it is what the mine readout counts down -- so the count  }
+      { goes up entering pmFlag and comes back down leaving it, and pmQuery    }
+      { never touches it.                                                      }
+      case cells[r, c].playerMark of
+
+         pmNone :
+            begin
+               cells[r, c].playerMark := pmFlag;
+               flagsPlaced := flagsPlaced + 1
+               { No cap on flags: the player may plant more flags than there  }
+               { are mines, and the mine counter (mineCount - flagsPlaced)    }
+               { then goes negative, exactly as in the original.  The         }
+               { counter drawing code clamps the DISPLAY, not the count.      }
+            end;
+
+         pmFlag :
+            begin
+               cells[r, c].playerMark := pmQuery;
+               flagsPlaced := flagsPlaced - 1   { a query claims no mine }
+            end;
+
+         pmQuery :
+            cells[r, c].playerMark := pmNone    { back to a clean cover }
+
       end
    end
 end;
@@ -407,7 +450,12 @@ begin
             if (dc <> 0) or (dr <> 0) then
                if (c + dc >= 1) and (c + dc <= cols) and
                   (r + dr >= 1) and (r + dr <= rows) then
-                  if cells[r + dr, c + dc].isFlagged then n := n + 1;
+                  { FLAGS only.  A "?" neighbour is not a commitment and must  }
+                  { not arm the chord -- if it counted, an unsure player could  }
+                  { fire a chord they never meant to take.  It stays in the    }
+                  { chord's line of fire instead: ChordCell opens it like any  }
+                  { other unflagged neighbour.                                 }
+                  if cells[r + dr, c + dc].playerMark = pmFlag then n := n + 1;
    AdjFlags := n
 end;
 

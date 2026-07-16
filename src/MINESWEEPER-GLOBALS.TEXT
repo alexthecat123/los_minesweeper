@@ -67,12 +67,16 @@ const
    { Document / data-segment layout                                             }
    {---------------------------------------------------------------------------}
 
-   msDocVersion = 1;      { Version stamp stored in the data segment.  If we    }
+   msDocVersion = 2;      { Version stamp stored in the data segment.  If we    }
                           { reopen a segment whose stamp does not match (an     }
                           { older build, or garbage after a crash -- see the    }
                           { -321 e_baddata warning, 05-os-syscalls section 1.6) }
                           { we throw the contents away and start with defaults, }
                           { exactly as the Calculator does with its own stamp.  }
+                          { Bumped 1 -> 2 when MSCell's isFlagged boolean       }
+                          { became the three-state playerMark: the cells array  }
+                          { changed shape, so a set-aside v1 board MUST be      }
+                          { discarded rather than reinterpreted bit for bit.    }
 
    {---------------------------------------------------------------------------}
    { Board geometry.                                                            }
@@ -206,11 +210,17 @@ const
       miCustom       = 5;        {   Custom Level ... }
 
    mScrap = 5;                   { the SCRAP window's whole menu bar.  When our }
-      smiAsideAll = 1;           { Copy makes us the scrap's owner, activating  }
-      smiAside    = 2;           { the scrap window routes ITS folderActivate   }
+      smiAsidAll = 1;            { Copy makes us the scrap's owner, activating  }
+      smiAside   = 2;            { the scrap window routes ITS folderActivate   }
       { item 3 is a '-' separator }{ to us, and this is the bar we put up      }
-      smiMonitor  = 4;           { (PutUpScrapMenus below) -- the Calculator's  }
+      smiMonitor = 4;            { (PutUpScrapMenus below) -- the Calculator's  }
                                  { menu 7 move, APHP-HP.TEXT:3624-3630.         }
+                                 { "Set Aside Everything" is smiAsidAll, not    }
+                                 { smiAsideAll: only 8 characters of an         }
+                                 { identifier are significant, so the longer    }
+                                 { spelling would BE smiAside.  FilerComm hit   }
+                                 { the same wall and spells it cmdClosAll       }
+                                 { (06-lib-fc section 4).                       }
 
    lastBarMenu = 4;              { menus installed in OUR window's bar: mFile..mLevel }
    lastMenu    = 5;              { highest menu InitMP reads from the phrase file     }
@@ -349,10 +359,31 @@ type
               msWon,       { all safe cells revealed -- timer frozen           }
               msLost);     { a mine was revealed -- timer frozen               }
 
+   { What the player has written on a covered cell.  The original cycles a     }
+   { cell through all three with successive flag gestures -- flag, then query, }
+   { then clean again -- so the mark is one three-state field, not a pair of   }
+   { booleans that could contradict each other.                                }
+   {                                                                           }
+   { The two marks are NOT the same kind of claim, and everything downstream   }
+   { turns on the difference.  A flag says "a mine is here": it counts against }
+   { the mine readout, it protects the cell from being opened, and it arms the }
+   { chord.  A query says only "I am not sure yet": it is a note the player    }
+   { writes to themselves, so it counts for nothing, protects nothing, and a   }
+   { click (or a flood, or a chord) opens the cell straight through it.  That  }
+   { is exactly the original's bargain -- the query is a reminder, never a     }
+   { commitment.                                                               }
+
+   MSMark = (pmNone,            { clean cover                                  }
+             pmFlag,            { the player's flag: "a mine is here"          }
+             pmQuery);          { the player's "?": "I'm not sure yet"         }
+
    MSCell = packed record
       isMine     : boolean;      { true if this cell hides a mine              }
       isRevealed : boolean;      { true once the player has opened it          }
-      isFlagged  : boolean;      { true while the player's flag sits on it     }
+      playerMark : MSMark;       { what the player has written on it (the      }
+                                 { name keeps its distance from MarkDirty's    }
+                                 { "marks", which are repaint bookkeeping and  }
+                                 { nothing to do with the board's contents)    }
       adjMines   : 0..15;        { number of mines in the 8 neighbours (0..8;  }
                                  { the subrange is 0..15 so the packed field   }
                                  { is a clean 4 bits)                          }
@@ -659,7 +690,7 @@ end;
 procedure ScrapMenuCommand {item : integer};
 begin
    case item of
-      smiAsideAll :
+      smiAsidAll :
          DoFilingCmd(cmdClosAll);         { filing belongs to the Filer - 06-lib-fc }
       smiAside :
          DoFilingCmd(cmdClose);           { the active window IS the scrap here }

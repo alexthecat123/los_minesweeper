@@ -900,9 +900,9 @@ begin
       folderUpdate :
          if theEvent.who = scrapFolder then
             { The scrap window we own was damaged; it draws its own contents  }
-            { (DrawScrapWindow brackets with BeginUpdate itself).  Painting   }
+            { (DrawWindowScrap brackets with BeginUpdate itself).  Painting   }
             { the BOARD into it -- the else-arm below -- would be wrong.      }
-            DrawScrapWindow(true)
+            DrawWindowScrap(true)
          else begin
             { Redraw the damaged area: window contents first, panel on top.   }
             { BeginUpdate clips everything to the damage, so this is cheap    }

@@ -2,11 +2,11 @@
 {                                                                              }
 {  MINESWEEPER-DRAW.TEXT  --  unit MSDraw                                      }
 {                                                                              }
-{  All QuickDraw rendering: the board, the cells, the digits, mines and        }
-{  flags, the status bar with its two three-digit readouts, and the face /     }
-{  reset button.  Also the geometry helpers (cell <-> pixel mapping) that      }
-{  the click handler needs -- geometry lives with the drawing because the      }
-{  two must agree to the pixel.                                                }
+{  All QuickDraw rendering: the board, the cells, the digits, the mines, the   }
+{  flags and query marks, the status bar with its two three-digit readouts,    }
+{  and the face / reset button.  Also the geometry helpers (cell <-> pixel     }
+{  mapping) that the click handler needs -- geometry lives with the drawing    }
+{  because the two must agree to the pixel.                                    }
 {                                                                              }
 {  THE ONE VISUAL RULE THAT MATTERS: the Lisa's pixels are 2/3 as wide as      }
 {  they are tall (06-lib-hw, MouseScaling), so anything meant to LOOK square   }
@@ -22,6 +22,8 @@
 {      visibly sunken next to its raised neighbours;                           }
 {    - digits 1..3 plain, 4..8 BOLD -- with no colour to grade danger, we      }
 {      lean on type weight (TextFace);                                         }
+{    - the query mark is a plain "?" set in the cell font, quieter than the    }
+{      flag it alternates with: a flag is a claim, a "?" is a shrug;           }
 {    - the fatal mine sits on an INVERTED cell (white mine on black): the      }
 {      strongest emphasis a 1-bit screen has;                                  }
 {    - a wrong flag (flag on a non-mine, shown after a loss) is a mine with    }
@@ -151,7 +153,16 @@ procedure DrawContents (window : WindowPtr);
 { libqd-PICTURES.TEXT:187 -- so recording never disturbs the screen).         }
 procedure RenderImage (port : GrafPtr);
 
-{ DrawScrapWindow -- service a folderUpdate for the SCRAP window.  Once Copy  }
+{ FrameImage -- outline rect (0,0,contentW,contentH) with a thin black box.    }
+{ Copy and Print call this on the port they are RECORDING, right after         }
+{ RenderImage and before ClosePicture, so the box becomes part of the          }
+{ picture.  On paper or pasted into a document there is no window frame to     }
+{ bound the image and it reads as floating; on screen the WM's own frame       }
+{ already does that job, which is why RenderImage does not draw this itself    }
+{ and DrawContents never gets a box.                                           }
+procedure FrameImage (port : GrafPtr);
+
+{ DrawWindowScrap -- service a folderUpdate for the SCRAP window.  Once Copy  }
 { (or a dialog-field Cut/Copy) makes this process the scrap's owner, the      }
 { scrap window's update events arrive HERE, and drawing our board into it     }
 { (which is what the plain update path would do) would be wrong.  The scrap   }
@@ -160,7 +171,7 @@ procedure RenderImage (port : GrafPtr);
 { two-way branch the Calculator's DrawContents makes for its scrap folder     }
 { (APHP-HP.TEXT:1315-1321).  normal = true brackets with BeginUpdate /        }
 { EndUpdate exactly like doUpdateEvent.                                       }
-procedure DrawScrapWindow (normal : boolean);
+procedure DrawWindowScrap (normal : boolean);
 
 
 IMPLEMENTATION
@@ -414,6 +425,33 @@ begin
 end;
 
 {------------------------------------------------------------------------------}
+{  DrawQueryGlyph -- the "?" the player leaves on a cell they are unsure of   }
+{  (the middle step of the flag cycle).                                       }
+{                                                                             }
+{  Type, not a hand-drawn glyph: a "?" is a character, the cell font already  }
+{  fits the cell, and DrawDigitGlyph has already proved the centering.  So    }
+{  this is DrawDigitGlyph with a different character, measured the same way   }
+{  (CharWidth / GetFontInfo) for the same reason -- 21 x 14 shows a pixel of  }
+{  slop.                                                                      }
+{                                                                             }
+{  Always PLAIN, never bold: the query is the quietest thing on the board and }
+{  should read that way next to the flag it alternates with.  A flag is a     }
+{  claim and gets a solid black pennant; a "?" is a shrug.                    }
+{------------------------------------------------------------------------------}
+
+procedure DrawQueryGlyph (var box : Rect);
+var fi : FontInfo;
+begin
+   TextFont(fntCell);                    { 12-point tile: fits a 14-px cell }
+   TextFace([]);                         { plain -- and never trust the last caller }
+   GetFontInfo(fi);                      { metrics AFTER font+face are set }
+   MoveTo(box.left + (cellW - CharWidth('?')) div 2,
+          box.top + (cellH + fi.ascent - fi.descent) div 2);
+   TextMode(srcOr);                      { transparent: the gray bevel stays under it }
+   DrawChar('?')
+end;
+
+{------------------------------------------------------------------------------}
 {  DrawDigitGlyph -- a cell's 1..8 count, centered in the cell.  With no      }
 {  colours to grade danger on 1-bit hardware, weight does the work: 1..3      }
 {  plain, 4..8 bold (TextFace [bold] is synthesised by QuickDraw from the     }
@@ -489,19 +527,26 @@ begin
          LineTo(box.right - 1, box.top);
 
          { What sits ON the covered cell depends on the endgame:              }
-         {   - mid-game: the player's flag, if any;                           }
+         {   - mid-game: the player's mark, if any -- a flag or a "?";        }
          {   - after a LOSS: every unflagged mine is exposed (drawn on the    }
          {     bevel -- the cells stay unrevealed in the data, this is purely }
          {     presentation), and a flag on a NON-mine is shown as a mine     }
          {     with an X through it: "this flag was wrong".                   }
+         {                                                                    }
+         { A "?" is not a flag in either rule, and both readings of that are  }
+         { the ones we want.  A mine under a "?" is exposed like any other    }
+         { unflagged mine -- the "?" simply gives way to it.  A "?" on a      }
+         { blank is never called wrong, because it never claimed anything:    }
+         { the mark just stays put.  Only flags are ever X'd out, which is    }
+         { what the original does too.                                        }
          showMine := false;
          if state = msLost then
-            if cells[r, c].isMine and (not cells[r, c].isFlagged) then
+            if cells[r, c].isMine and (cells[r, c].playerMark <> pmFlag) then
                showMine := true;
 
          if showMine then
             DrawMineGlyph(box)
-         else if cells[r, c].isFlagged then begin
+         else if cells[r, c].playerMark = pmFlag then begin
             if (state = msLost) and (not cells[r, c].isMine) then begin
                DrawMineGlyph(box);              { the mine that wasn't there ... }
                PenNormal;                       { ... struck through corner to corner }
@@ -513,6 +558,8 @@ begin
             else
                DrawFlagGlyph(box)
          end
+         else if cells[r, c].playerMark = pmQuery then
+            DrawQueryGlyph(box)
       end
 
    end
@@ -742,7 +789,32 @@ begin
 end;
 
 {------------------------------------------------------------------------------}
-procedure DrawScrapWindow {normal : boolean};
+procedure FrameImage {port : GrafPtr};
+var all : Rect;
+begin
+   if port = nil then exit(FrameImage);
+   SetPort(port);
+   SetRect(all, 0, 0, contentW, contentH);
+
+   PenNormal;                            { 1 px, black, patCopy (06-lib-qd-a).   }
+                                         { RenderImage's last Draw* routine left }
+                                         { the pen in whatever state suited IT,  }
+                                         { and inside an open picture that state }
+                                         { is whatever was recorded last -- so   }
+                                         { start from a known pen                }
+   FrameRect(all)                        { drawn INSIDE the edges (06-lib-qd-a): }
+                                         { the box lands on the outermost pixels }
+                                         { of the image, never outside the       }
+                                         { picture frame, and winMargin's 8 px   }
+                                         { of white keep it clear of the         }
+                                         { counters, face and board.  No         }
+                                         { ClipRect needed: FrameRect cannot     }
+                                         { draw beyond its own rect, which IS    }
+                                         { the image                             }
+end;
+
+{------------------------------------------------------------------------------}
+procedure DrawWindowScrap {normal : boolean};
 var err : integer;
 begin
    if normal then BeginUpdate(scrapFolder);   { consume the damage - 06-lib-wm-a }
