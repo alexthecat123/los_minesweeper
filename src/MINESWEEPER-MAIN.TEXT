@@ -513,19 +513,45 @@ end;
 {  DoBoardClick -- a buttonDown in our window: the input rules of section     }
 {  5.4, verbatim:                                                              }
 {                                                                              }
-{     buttonDown in a covered cell:                                            }
+{     a click in a covered cell:                                               }
 {        Apple (or Option) held, or Flag Mode on         -> toggle flag        }
 {        else                                            -> reveal             }
-{     buttonDown in a revealed number:                                         }
+{     a click in a revealed number:                                            }
 {        double-click (same cell, within clickDelay) and                       }
 {        adjacent flags = the number                     -> chord              }
-{     buttonDown in the reset button                     -> new game           }
+{     a click in the reset button                        -> new game           }
+{                                                                              }
+{  A "click" here is press AND release, and it is the RELEASE that does the    }
+{  work -- the same bargain TrackFacePress strikes for the reset button, and   }
+{  the one every other button on the machine strikes.  The press only starts   }
+{  the gesture: the face worries, and the player is free to change their mind  }
+{  by rolling onto another cell (that cell is the one that opens) or off the   }
+{  board entirely (nothing opens at all).  Committing on the press would make  }
+{  a mis-aimed press unrecoverable, which on a minesweeper board means a lost  }
+{  game with no way to take it back.                                           }
+{                                                                              }
+{  The MODIFIERS, though, are read from the press: theEvent still holds the    }
+{  buttonDown, so a flag stays a flag even if Apple is let go during the       }
+{  hold.  The key you were holding when you committed to the gesture is the    }
+{  one you meant.                                                              }
+{                                                                              }
+{  Which is also what decides whether the face worries: a FLAG worries no      }
+{  one.  Planting a flag cannot lose the game -- it is a note the player       }
+{  writes to themselves, and it is always undoable -- so the face has nothing  }
+{  to fear and does not pretend otherwise.  Only a reveal is a gamble.  (The   }
+{  original worries on the left button and stays calm on the right; Apple and  }
+{  Flag Mode are our right button.)  A press on an already-open number DOES    }
+{  worry, though, even when it opens nothing: it may yet turn out to be half   }
+{  of a chord, which is a reveal like any other -- and the original worries    }
+{  there too.                                                                  }
 {------------------------------------------------------------------------------}
 
 procedure DoBoardClick;
 var c, r : integer;
     box  : Rect;
+    pt   : Point;
     gameOver : boolean;
+    worried  : boolean;
 begin
    { The reset button works whatever state the game is in -- it is the way    }
    { OUT of a finished game.  No confirmation: resetting mid-game is an       }
@@ -546,6 +572,33 @@ begin
    { start the next game.                                                     }
    if (myDoc^.state = msWon) or (myDoc^.state = msLost) then
       exit(DoBoardClick);
+
+   { The press is on the live board, so the gesture is under way.  A reveal   }
+   { worries the face until the button comes up, wherever it comes up; a      }
+   { flag gesture leaves it alone, and `worried' remembers which of the two   }
+   { this is so that only a face that was actually changed gets changed back. }
+   {                                                                          }
+   { StillDown rather than Button, for the reason spelled out over            }
+   { TrackFacePress -- it turns false the moment the release is QUEUED, so    }
+   { this loop cannot outrun the event stream and hang holding the CPU.  The  }
+   { buttonUp itself is still delivered afterwards; ProcessTheEvent ignores   }
+   { it.                                                                      }
+   worried := not (theEvent.appleKey or theEvent.codeKey or myDoc^.flagMode);
+   if worried then DrawFace(true);
+   SetPort(myWindow);
+   while StillDown do
+      LetOthersRun;                      { never spin without yielding }
+
+   { Whatever cell is under the mouse NOW is the one the player chose.  Off   }
+   { the board (rolled onto the frame, the readouts, or right out of the      }
+   { window) means they chose nothing: the move is abandoned, any worry is    }
+   { wiped off, and lastClk is left alone so this non-click cannot become     }
+   { half of a double-click.                                                  }
+   GetMouse(pt);                         { local coords -- the port is ours }
+   if not PointToCell(pt, c, r) then begin
+      if worried then DrawFace(false);
+      exit(DoBoardClick)
+   end;
 
    { Freeze the clock at the truth BEFORE the move: if this click wins or     }
    { loses, elapsed must hold the second the game actually ended, not the     }
@@ -568,12 +621,12 @@ begin
          { any event (LIBWM-EVENTS.TEXT:507-522).                              }
          ToggleFlag(c, r);
          DrawDirtyCells;                 { one cell changed ... }
-         DrawCounter                 { ... and the count readout }
+         DrawCounter                     { ... and the count readout.  The     }
+                                         { face is untouched: a flag gesture   }
+                                         { never worried it in the first place }
       end
       else begin
-         { A reveal.  The face worries while fate is decided -- pure          }
-         { theatre, but it is THE minesweeper gesture.                        }
-         DrawFace(true);
+         { A reveal -- the move the worried face has been waiting on.         }
 
          if myDoc^.state = msFresh then begin
             { FIRST CLICK of the game: only now are the mines placed, and     }
@@ -623,8 +676,13 @@ begin
                DoWin;
                DrawTimer
             end
+            else if worried then DrawFace(false)
          end
       end
+      else if worried then DrawFace(false)  { a lone click on a number opens   }
+                                            { nothing, but the face has been   }
+                                            { holding its breath since the     }
+                                            { press and can now let it out     }
    end;
 
    { Remember this click for the next one's double-click test. }
@@ -846,8 +904,11 @@ begin
             { activation itself.                                              }
 
       buttonUp :
-         { Button releases are consumed inside the tracking loops (StillDown) }
-         { where they matter; the queued event itself needs nothing.          }
+         { Every release that matters has already been acted on: the tracking }
+         { loops in DoBoardClick and TrackFacePress wait it out with          }
+         { StillDown -- which goes false as soon as the release is QUEUED --  }
+         { and read the mouse themselves.  So this event always arrives after }
+         { its own consequences, and there is nothing left to do with it.     }
          ;
 
       keyDown :
