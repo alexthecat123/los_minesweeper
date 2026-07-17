@@ -1,6 +1,7 @@
 # LOS Minesweeper
 
 Minesweeper for the Lisa Office System, written with help from Claude!
+<img width="1280" height="720" alt="IMG_4226" src="https://github.com/user-attachments/assets/e7e67091-ba69-4420-94bc-1554ab9df733" />
 
 # Introduction
 
