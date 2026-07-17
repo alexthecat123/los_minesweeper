@@ -22,8 +22,9 @@
 {      visibly sunken next to its raised neighbours;                           }
 {    - digits 1..3 plain, 4..8 BOLD -- with no colour to grade danger, we      }
 {      lean on type weight (TextFace);                                         }
-{    - the query mark is a plain "?" set in the cell font, quieter than the    }
-{      flag it alternates with: a flag is a claim, a "?" is a shrug;           }
+{    - the query mark is a hand-drawn "?", every stroke 2 units thick, for     }
+{      the same reason the mine and the flag are hand-drawn: type this small   }
+{      cannot hold its own against the cover's dither (see DrawQueryGlyph);    }
 {    - the fatal mine sits on an INVERTED cell (white mine on black): the      }
 {      strongest emphasis a 1-bit screen has;                                  }
 {    - a wrong flag (flag on a non-mine, shown after a loss) is a mine with    }
@@ -188,6 +189,8 @@ const
    wellPad  = 5;     { white pixels between the well frame and the digits      }
    faceW    = 33;    { reset button 33 x 22 -- 3:2, so it reads as a square    }
    faceH    = 22;    {   (33 * 2/3 = 22; see the aspect-ratio rule above)      }
+   qmW      = 11;    { the query mark's box, 11 x 11 in a 21 x 14 cell -- so   }
+   qmH      = 11;    {   7 x 11 units on glass, upright, as a "?" should be    }
 
 {------------------------------------------------------------------------------}
 {  TargetPort -- the port this unit draws into: imagePort while RenderImage    }
@@ -428,27 +431,67 @@ end;
 {  DrawQueryGlyph -- the "?" the player leaves on a cell they are unsure of   }
 {  (the middle step of the flag cycle).                                       }
 {                                                                             }
-{  Type, not a hand-drawn glyph: a "?" is a character, the cell font already  }
-{  fits the cell, and DrawDigitGlyph has already proved the centering.  So    }
-{  this is DrawDigitGlyph with a different character, measured the same way   }
-{  (CharWidth / GetFontInfo) for the same reason -- 21 x 14 shows a pixel of  }
-{  slop.                                                                      }
+{  Hand-drawn, like the mine and the pennant.  This was type once -- the "?"  }
+{  of fntCell, bold, srcOr'd onto the cover -- and type cannot win here.  The }
+{  trap: QuickDraw synthesises bold by smearing the glyph SIDEWAYS            }
+{  (06-lib-qd-a, TextFace), so bold doubles the upright stems and does        }
+{  nothing whatever to a horizontal stroke.  The bowl's top and the dot       }
+{  stayed ONE PIXEL tall -- and an isolated black pixel on the cover's ltGray }
+{  is precisely what that dither is MADE of.  The mark read as jagged and the }
+{  dot read as nothing at all.  There is no bolder face to escalate to; the   }
+{  fix is to stop asking type for a weight it does not have.                  }
 {                                                                             }
-{  Always PLAIN, never bold: the query is the quietest thing on the board and }
-{  should read that way next to the flag it alternates with.  A flag is a     }
-{  claim and gets a solid black pennant; a "?" is a shrug.                    }
+{  So every stroke here is 2 units thick ON GLASS: 3 pixels across, 2 pixels  }
+{  down (the 3:2 rule at the top of the file).  That is a solid black run in  }
+{  either axis, which the dither has nothing to answer with.  The dot is a    }
+{  3 x 2 block -- a SQUARE on glass, and the whole point of the exercise.     }
+{                                                                             }
+{  11 x 11, plotted as horizontal runs like the pennant, for the same reason  }
+{  the pennant is: at this size, placing the pixels beats asking QuickDraw    }
+{  to round an arc and hoping.  Centred by the same rule as the digits; the   }
+{  odd leftover row falls BELOW the mark, which sits it one row under the     }
+{  white highlight and leaves a row of air above the black shadow.  A "?"     }
+{  wants to sit high anyway -- the dot carries the eye down.                  }
+{                                                                             }
+{        ...#####...   crown: 2 rows, inset on top so the corners round       }
+{        .#########.                                                          }
+{        ###.....###   sides: 3 px = 2 units, counter 5 x 3 -- big enough     }
+{        ###.....###   that the pillow still shows through the bowl           }
+{        ........###   the left side stops: the bowl opens at the bottom      }
+{        .....#####.   left, and the right side carries on into the tail ...  }
+{        ....###....   ... which lands on the stem, centred in the cell       }
+{        ...........   two rows of air, so the dot reads as its own mark      }
+{        ...........                                                          }
+{        ....###....   the dot                                                }
+{        ....###....                                                          }
 {------------------------------------------------------------------------------}
 
 procedure DrawQueryGlyph (var box : Rect);
-var fi : FontInfo;
+var gx, gy : integer;                    { top-left of the 11 x 11 mark }
+    r      : Rect;
 begin
-   TextFont(fntCell);                    { 12-point tile: fits a 14-px cell }
-   TextFace([]);                         { plain -- and never trust the last caller }
-   GetFontInfo(fi);                      { metrics AFTER font+face are set }
-   MoveTo(box.left + (cellW - CharWidth('?')) div 2,
-          box.top + (cellH + fi.ascent - fi.descent) div 2);
-   TextMode(srcOr);                      { transparent: the gray bevel stays under it }
-   DrawChar('?')
+   PenNormal;                            { 1 x 1, black, patCopy: PaintRect fills }
+                                         { with the pen pattern (06-lib-qd-a)     }
+   gx := box.left + (cellW - qmW) div 2;
+   gy := box.top + (cellH - qmH) div 2;  { 3 spare rows: 1 above, 2 below }
+
+   { The crown, two rows, the upper one inset to take the corners off.        }
+   MoveTo(gx + 3, gy);      LineTo(gx + 7, gy);
+   MoveTo(gx + 1, gy + 1);  LineTo(gx + 9, gy + 1);
+
+   { The bowl's sides.  The left one is two rows and stops; the right one is  }
+   { three and keeps going -- that asymmetry is what makes a "?" and not an   }
+   { "O" with a tail.                                                         }
+   SetRect(r, gx, gy + 2, gx + 3, gy + 4);          PaintRect(r);
+   SetRect(r, gx + 8, gy + 2, gx + 11, gy + 5);     PaintRect(r);
+
+   { The tail: out of the right side, down and left onto the stem.            }
+   MoveTo(gx + 5, gy + 5);  LineTo(gx + 9, gy + 5);
+   MoveTo(gx + 4, gy + 6);  LineTo(gx + 6, gy + 6);
+
+   { The dot.                                                                 }
+   SetRect(r, gx + 4, gy + 9, gx + 7, gy + 11);
+   PaintRect(r)
 end;
 
 {------------------------------------------------------------------------------}
