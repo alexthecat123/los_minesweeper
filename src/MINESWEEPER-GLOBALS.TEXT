@@ -300,6 +300,12 @@ const
    { printer's resolution.  LisaWrite prints its pasted pictures through        }
    { exactly this call ("draw, scaled to rT" -- APLW-UNITFIGIMAGE.TEXT:190),    }
    { so a DrawPicture inside an open print page is a shipped, proven path.      }
+   {                                                                            }
+   { TEXT IS THE EXCEPTION, and it is the one that bites: QuickDraw sizes type  }
+   { for the device on its own (the port's device is part of the font's         }
+   { identity -- 06-lib-fm section 2), so glyphs come out of the printer's      }
+   { strike already printer-sized and must NOT be scaled a second time by the   }
+   { playback.  DoPrintBoard's THE TEXT has the whole story and the fix.        }
    {---------------------------------------------------------------------------}
 
    printLDSN = 1;         { LDSN PrDocStart maps its private spool segment      }

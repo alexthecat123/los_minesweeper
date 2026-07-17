@@ -939,6 +939,36 @@ begin
 end;
 
 {------------------------------------------------------------------------------}
+{  PrTextUnscaled -- the text bottleneck DoPrintBoard hangs on the print port }
+{  for the length of its DrawPicture.  Read THE TEXT in DoPrintBoard's header }
+{  first: this is the other half of that fix.                                 }
+{                                                                              }
+{  QuickDraw funnels every text call through thePort^.grafProcs^.textProc     }
+{  (CallText, libqd-text.text:212-230), which is the one seam a client can    }
+{  get into between DrawPicture and the glyphs.  We pass numer as BOTH scale  }
+{  factors: numer/numer = 1:1, "draw at the device's own size".  Passing      }
+{  numer twice instead of building a (1,1) point is LisaWrite's exact idiom   }
+{  (LWStdText, APLW-UNITFIGIMAGE.TEXT:80-86, "call with scaling 1:1"), and it }
+{  is sound because only the RATIO is ever read: DrText scales the pen        }
+{  advance by numer/denom (libqd-DRAWTEXT.TEXT:121-123) and compares the two  }
+{  to decide whether to stretch the glyph bits at all (:161-163), so any      }
+{  equal pair means unscaled -- and an equal pair also takes the fast path    }
+{  that skips StretchBits entirely.                                           }
+{                                                                              }
+{  Calling StdText from inside a textProc does not recurse: CallText is what  }
+{  dispatches through grafProcs, StdText goes straight on to DrText.  And it  }
+{  is what the printer needs -- StdText, not DrText, is what appends the text }
+{  opcodes to the page picture the driver is spooling (libqd-text.text:105-   }
+{  149), so the 1:1 scale is what lands in the spool file.                    }
+{------------------------------------------------------------------------------}
+
+procedure PrTextUnscaled (count : integer; textAddr : QDPtr;
+                          numer, denom : Point);
+begin
+   StdText(count, textAddr, numer, numer)
+end;
+
+{------------------------------------------------------------------------------}
 {  DoPrintBoard -- "Print ...": the copies dialog, then the four-call print   }
 {  bracket around one page (06-lib-pr-a section A.4).                          }
 {                                                                              }
@@ -950,6 +980,50 @@ end;
 {  square, LisaDraw's own conversion (GetPrScl, APLD-PRT.TEXT:114-130).       }
 {  Playing a picture inside an open print page is LisaWrite's shipped path    }
 {  for printing pasted figures (APLW-UNITFIGIMAGE.TEXT:190).                  }
+{                                                                              }
+{  THE TEXT, which does NOT come along for that ride.  Everything in this     }
+{  picture is geometry except three things -- the two readouts and the cell   }
+{  digits -- and text is the one thing QuickDraw has ALREADY sized for the    }
+{  device by the time we see it.  A font's identity is family + face +        }
+{  DEVICE (06-lib-fm section 2), and the device is read off the port, so the  }
+{  fntCell we drew from the screen's strike file comes back off the PRINTER's }
+{  strike file the moment the port is the print port: same family, different  }
+{  file -- the 'S' (screen) strike vs. the 'H' (hi-res dot matrix) strike,    }
+{  chosen by nothing but the port's device byte (AssignDevice,                }
+{  libfm-fontmgr.text:906-920).  The 'H' glyphs are already drawn bigger in   }
+{  DOTS by exactly the printer's resolution ratio -- 160/96 across, 144/64    }
+{  down, on the C.Itoh in hi-res portrait (libpr-ciprocs.text:411) -- which   }
+{  is to say they are already the size on paper that they are on glass.       }
+{  Playback then hits them with the picture's scale factor on TOP of that     }
+{  (it hands its own numer/denom to StdText -- libqd-PICTURES.TEXT:865-871),  }
+{  and the same ratio gets applied twice: the readouts come out about double  }
+{  size.  Geometry has no such device compensation, which is exactly why it   }
+{  scales correctly and only the type is wrong -- and why the picture is      }
+{  right on screen and right in the Scrap, where it plays back 1:1 into a     }
+{  port whose device is still the screen.                                     }
+{                                                                              }
+{  (The low-res dot matrix does not show this: it reports 96 x 72 and is fed  }
+{  the SCREEN strike -- same AssignDevice, fHiRes false -- so both scalings   }
+{  are ~1.  The driver even fakes its resolution in landscape to keep that    }
+{  true, "Lie to user to get fonts & graphics to scale",                      }
+{  libpr-ciprocs.text:466-473.  Which is the whole design in one comment:     }
+{  the app's geometry scale factor is MEANT to equal the strike's, so that    }
+{  applying it to geometry alone lands the two together.)                     }
+{                                                                              }
+{  The cure is to take the second scaling away: install PrTextUnscaled (see   }
+{  it) as the port's textProc for the duration of the playback, and the       }
+{  device strike lands at its natural size.  This is not our invention --     }
+{  LisaWrite hangs LWStdText on the port around the very DrawPicture we       }
+{  copied ("change the text procedure to unscaled",                           }
+{  APLW-UNITFIGIMAGE.TEXT:186), and LisaDraw, which builds its pages by hand  }
+{  rather than from a picture, does the same thing in its own idiom: printing }
+{  scales a text object's LOCATION and never touches its font                 }
+{  (ScaleObj, APLD-DA1.TEXT:736-737) -- and ShowPrObj scales the pen for      }
+{  every object EXCEPT text, in as many words (APLD-PRT.TEXT:251-254).        }
+{                                                                              }
+{  Only textProc is swapped, and only across DrawPicture: the print port's    }
+{  grafProcs are the standard ones with the driver's spool capture in         }
+{  putPicProc (LibPr-prspool.text:530-532), and that must keep running.       }
 {                                                                              }
 {  THE PICTURE'S MEMORY.  Tens of kilobytes for a big board -- far beyond     }
 {  the private heap -- so it is recorded into a THROWAWAY data segment        }
@@ -978,6 +1052,9 @@ var fNewStl  : boolean;
     pic      : PicHandle;
     saveHz   : THz;
     savePort : GrafPtr;
+    saveProcs: QDProcsPtr;               { the print port's bottlenecks, parked }
+    saveText : QDPtr;                    { across the playback (see THE TEXT)   }
+    stdProcs : QDProcs;
     err      : integer;
     junkErr  : integer;
     schedErr : integer;
@@ -1065,7 +1142,27 @@ begin
                dst.bottom := dst.top + h
             end;
 
-            DrawPicture(pic, dst)        { scaled playback into the spool file }
+            { Take the picture's scale factor off the text on the way past --  }
+            { the device strike is already printer-sized (see THE TEXT).       }
+            with prPort.gport do begin
+               saveProcs := grafProcs;
+               if saveProcs = nil then begin
+                  { PrDocStart always leaves procs here (LibPr-prspool.text:   }
+                  { 530), so this is belt and braces -- but a nil would mean a  }
+                  { nil dereference one line down.                             }
+                  SetStdProcs(stdProcs);
+                  grafProcs := @stdProcs
+               end;
+               saveText := grafProcs^.textProc;
+               grafProcs^.textProc := @PrTextUnscaled
+            end;
+
+            DrawPicture(pic, dst);       { scaled playback into the spool file }
+
+            with prPort.gport do begin
+               grafProcs^.textProc := saveText;
+               grafProcs := saveProcs   { and if we lent it stdProcs, that      }
+            end                         { local dies with this frame, unused    }
          end;
          junkB := PrPageEnd(prRec, prPort)
          { One page: the loop the template puts here collapses to a single     }
