@@ -75,7 +75,7 @@ Start a new game?  The game in progress will be lost.
 ; -- The win notice.  ^1 = mine count, ^2 = elapsed seconds, both filled by
 ;    ParamAlert just before the NoteAlert (MINESWEEPER-MAIN.TEXT, DoWin).
 20 note alert
-You swept all ^1 mines in ^2 seconds.
+You won! You swept all ^1 mines in ^2 seconds.
 
 ; -- Best Times.  ^1/^2/^3 are one preformatted line per fixed level
 ;    ("012  Alex", or phrase 915's text when a level has no record yet).
