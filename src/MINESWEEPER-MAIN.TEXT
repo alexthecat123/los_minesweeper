@@ -373,12 +373,44 @@ end;
 {==============================================================================}
 
 {------------------------------------------------------------------------------}
+{  ClockReady -- may a game start?  Only if the machine's clock is running:   }
+{  a game is a timed thing, and a Lisa whose clock has never been set (dead   }
+{  battery, or a machine fresh out of a closet) hands Get_Time the same       }
+{  instant forever -- the readout would never leave 000 and every "best       }
+{  time" the book collected would be a zero.  Better to refuse the game and   }
+{  say why, since we cannot fix it ourselves: setting the clock takes         }
+{  set_time, a PRIVILEGED call, so it is the Clock tool's job and the alert   }
+{  sends the player there.  (The test itself, and why it is nearly            }
+{  always free, is ClockIsRunning in MSGlobals.)                              }
+{                                                                             }
+{  Guarding the two doors a game can come through -- this one, and the first  }
+{  reveal in DoBoardClick, which is where the stopwatch actually starts --    }
+{  covers the restored-board case too: a board set aside mid-deal comes back  }
+{  playable without anyone calling StartLevel at all.                         }
+{------------------------------------------------------------------------------}
+
+function ClockReady : boolean;
+begin
+   if ClockIsRunning then
+      ClockReady := true
+   else begin
+      StopAlert(allAlerts, alrtNoClock);
+      ClockReady := false
+   end
+end;
+
+{------------------------------------------------------------------------------}
 {  StartLevel -- begin a fresh game, optionally asking first.  Handles the    }
 {  window-size change a level switch causes.                                  }
 {------------------------------------------------------------------------------}
 
 procedure StartLevel (newLevel : MSLevel; w, h, m : integer; confirm : boolean);
 begin
+   { No clock, no game -- and the refusal comes BEFORE the "start a new       }
+   { game?" question, so the player is never asked to give up a board for a   }
+   { new one we are about to decline to deal.                                 }
+   if not ClockReady then exit(StartLevel);
+
    { "Start a new game?  The game in progress will be lost." -- but ONLY      }
    { when one actually is in progress: a fresh or finished board has nothing  }
    { to lose and the question would be noise.  CautionAlert returns true for  }
@@ -658,6 +690,20 @@ begin
          { A reveal -- the move the worried face has been waiting on.         }
 
          if myDoc^.state = msFresh then begin
+            { This click is about to start the stopwatch, so it is the last   }
+            { moment to check there is one.  It matters even though           }
+            { StartLevel already asked: a board restored from the data        }
+            { segment is dealt and waiting without StartLevel ever running,   }
+            { and that board is exactly what the player finds after a launch  }
+            { onto a stopped clock.  Nothing has changed yet -- no mines      }
+            { placed, no state moved -- so all the refusal owes the board is  }
+            { the worried face, put back the way a cancelled move elsewhere   }
+            { puts it back.                                                   }
+            if not ClockReady then begin
+               if worried then DrawFace(false);
+               exit(DoBoardClick)
+            end;
+
             { FIRST CLICK of the game: only now are the mines placed, and     }
             { never on or beside this cell -- first-click safety (see         }
             { PlaceMines in MSGame).  This is also the moment the timer       }
@@ -1280,7 +1326,11 @@ begin
                begin
                   { Confirm the loss of a game in progress BEFORE the player  }
                   { spends effort in the dialog; the dialog's own Cancel      }
-                  { then still abandons the whole idea harmlessly.            }
+                  { then still abandons the whole idea harmlessly.  Same      }
+                  { reasoning for the clock: StartLevel would refuse below    }
+                  { anyway, and refusing here means the refusal does not      }
+                  { arrive after a board has been typed out.                  }
+                  if not ClockReady then exit(MenuCommand);
                   if myDoc^.state = msPlaying then
                      if not CautionAlert(allAlerts, alrtNewGame) then
                         exit(MenuCommand);
@@ -1465,6 +1515,17 @@ begin
    lastClkRow  := 0;
    nextClkPoll := 0;        { 0 is in the past: the first idle pass polls at once }
    ClearDirty;              { no cell is owed a repaint before a board exists }
+
+   StartClockCheck;         { first reading of the machine's clock, taken as    }
+                            { EARLY as it can be: ClockIsRunning proves the     }
+                            { clock is ticking by finding this reading stale,   }
+                            { and everything Initialize does after this line is }
+                            { time it does not have to spend waiting for it     }
+                            { later (MSGlobals).  No alert here, though -- the  }
+                            { Filer is still waiting on our answer to its       }
+                            { fcNone, and a modal box put up before that        }
+                            { handshake blocks the desktop.  The bad news       }
+                            { keeps until the player asks for a game.           }
 
    { (3) The private heap, carved out of the static myZone array.  Everything }
    { we allocate (menu blocks, the alert cache, Field Editor fields) lives    }

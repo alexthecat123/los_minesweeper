@@ -239,11 +239,16 @@ const
    { locked-in-cache "Swan Song" disk/memory alert).                            }
    {---------------------------------------------------------------------------}
 
-   alertVerNum = 3;       { version stamp expected in the phrase file; a       }
+   alertVerNum = 4;       { version stamp expected in the phrase file; a       }
                           { mismatch is only warning -3076, but bump both      }
-                          { sides together when renumbering alerts (06-lib-am) }
+                          { sides together when renumbering alerts (06-lib-am).}
                           { (3 = the build that added printing, alert 60 and   }
-                          { the scrap menu -- see the note in the phrase file) }
+                          { the scrap menu -- see the note in the phrase file. }
+                          { 4 adds alert 70, the stopped-clock refusal, and    }
+                          { phrase 916, the second half of the record          }
+                          { dialog's prompt: an old file has neither, so the   }
+                          { refusal would come out as alert 1 and the dialog   }
+                          { would lose half its prompt.)                       }
 
    alrtFallback  = 1;     { note    - "message not found" (required by format) }
    alrtSwanSong  = 2;     { stop    - startup-disk trouble (required, cached)  }
@@ -258,6 +263,12 @@ const
                           {           Everything past that point alerts        }
                           {           through the Printer Library's own        }
                           {           System.Pr. phrases (06-lib-pr-a).        }
+   alrtNoClock   = 70;    { stop    - the machine's clock is not running, so   }
+                          {           there is nothing to time a game with     }
+                          {           (ClockIsRunning, below).  Only the Clock }
+                          {           tool can put that right: set_time is     }
+                          {           privileged (05-os-syscalls section 12),  }
+                          {           so all we can do is say so.              }
 
    { "Get" phrases: number-only entries in the phrase file, one verbatim line  }
    { each, fetched with GetAlert (06-lib-am).  They let non-alert UI text      }
@@ -273,8 +284,12 @@ const
    phHeight      = 911;   { label of the custom dialog's height field  }
    phMines       = 912;   { label of the custom dialog's mines field   }
    phCustomTitle = 913;   { title line of the Custom Level dialog      }
-   phNameTitle   = 914;   { title line of the new-record name dialog   }
+   phNameTitle   = 914;   { new-record dialog: the line ABOVE the name box }
    phNoBest      = 915;   { best-times line shown for a level with no record }
+   phNamePrompt  = 916;   { new-record dialog: the line BELOW the name box.    }
+                          { Two phrases, not one, because one line long enough }
+                          { to say both would be wider than the panel -- the   }
+                          { box sits between them instead (MSDialog.DrawPanel).}
 
    {---------------------------------------------------------------------------}
    { Fonts (family numbers from FontMgr, 06-lib-fm section 3.4).  On the Lisa  }
@@ -594,8 +609,8 @@ procedure ClearDirty;
 {  We ask for GMT and never call Convert_Time: we only ever subtract two of    }
 {  these from each other, and an offset that is identical in both cancels.     }
 {  Skipping the conversion also skips any chance of a local-time jump (a DST   }
-{  change, or the user setting the clock in the Preferences tool) landing in   }
-{  the middle of a game.                                                       }
+{  change, or the user setting the clock in the Clock tool) landing in the     }
+{  middle of a game.                                                           }
 {                                                                              }
 {  The value returned is seconds since the start of the current GMT year --    }
 {  day is a Julian day-of-year, 1..366 (05-os-syscalls section 1.9) -- so it   }
@@ -607,6 +622,38 @@ procedure ClearDirty;
 {------------------------------------------------------------------------------}
 
 function ClockSecs : longint;
+
+{------------------------------------------------------------------------------}
+{  StartClockCheck / ClockIsRunning -- is there a clock to time a game WITH?   }
+{                                                                              }
+{  Everything above assumes the machine's clock/calendar is ticking.  On a     }
+{  Lisa whose clock has never been set (a dead battery, or a machine just out  }
+{  of storage) Get_Time answers happily and returns the SAME instant every     }
+{  time: the readout would sit on 000 for the whole game and every best time   }
+{  recorded would be a zero.  That is worse than no timer at all, so the game  }
+{  refuses to start until the clock runs.  We cannot fix it ourselves --       }
+{  set_time is PRIVILEGED (05-os-syscalls section 12), which is why setting    }
+{  the clock is the Clock tool's job and not an ordinary app's -- so all we    }
+{  can do is detect it and say so.                                             }
+{                                                                              }
+{  Detection is by observation: a clock is running if its reading CHANGES.     }
+{  Nothing in a Time_Rec says "unset", and msec is not to be trusted (see      }
+{  ClockSecs), so whole seconds are the only honest evidence -- and seeing a   }
+{  second turn over can take up to a second of waiting.                        }
+{                                                                              }
+{  Hence the two routines.  StartClockCheck takes a baseline reading at        }
+{  launch; ClockIsRunning, called much later (the first time the player asks   }
+{  for a game), usually finds the reading already different and answers        }
+{  instantly -- the wait was spent bringing the app up.  Only when the two     }
+{  agree does it stop and watch the clock, and then only for as long as it     }
+{  takes to prove the point.  The answer, once it is "yes", is latched: a      }
+{  clock that has been seen to run does not stop, and no later game pays for   }
+{  the question again.                                                         }
+{------------------------------------------------------------------------------}
+
+procedure StartClockCheck;
+
+function ClockIsRunning : boolean;
 
 
 {------------------------------------------------------------------------------}
@@ -657,6 +704,23 @@ procedure HandleFilerOp (var wantsOpen : boolean);
 
 IMPLEMENTATION
 
+const
+   { The clock-is-running test's own timings (StartClockCheck/ClockIsRunning). }
+   { NOTE THE NAMES: Lisa Pascal compares only the first EIGHT characters of   }
+   { an identifier, so a 'clkSliceMs'/'clkSlices' pair would be the SAME name  }
+   { twice and the compiler would reject the second one.                       }
+   clkWaitMs = 100;     { how long each look-away lasts, milliseconds }
+   clkTries  = 16;      { how many of them before we call the clock dead.     }
+                        { 16 x 100ms = 1.6s, comfortably more than the one    }
+                        { second a running clock needs to show a change --    }
+                        { and REAL seconds, because Delay_Time is timed by    }
+                        { the OS timer and not by the CPU's rate (the trap    }
+                        { the Window Manager's Time falls into; see ClockSecs)}
+
+var
+   clkBaseSecs : longint;   { the baseline reading, from StartClockCheck }
+   clkRuns     : boolean;   { latched true the moment the clock is seen to move }
+
 procedure MarkDirty {c, r : integer};
 begin
    if (c >= 1) and (c <= maxCols) and (r >= 1) and (r <= maxRows) then
@@ -684,6 +748,65 @@ begin
    { to fall back on.  A garbage read would show a garbage elapsed time for    }
    { one second and then correct itself.                                       }
    ClockSecs := ((ord4(t.day) * 24 + t.hour) * 60 + t.minute) * 60 + t.second
+end;
+
+procedure StartClockCheck;
+begin
+   clkRuns     := false;    { nothing observed yet -- unit variables are not  }
+   clkBaseSecs := ClockSecs { auto-initialised, so say both out loud          }
+end;
+
+function ClockIsRunning {: boolean};
+var tries : integer;
+    err   : integer;
+    iv    : timestmp_interval;
+    nowT  : Time_Rec;
+begin
+   if clkRuns then begin                 { asked and answered, once per launch }
+      ClockIsRunning := true;
+      exit(ClockIsRunning)
+   end;
+
+   { The free evidence first: the reading taken at launch.  If time has moved  }
+   { since then -- and by the time anyone asks for a game it normally has --   }
+   { we are done without waiting at all.                                       }
+   if ClockSecs <> clkBaseSecs then begin
+      clkRuns := true;
+      ClockIsRunning := true;
+      exit(ClockIsRunning)
+   end;
+
+   { Still the same second.  Either the clock is stopped, or the question came }
+   { so soon after launch that no second has turned over yet -- indistinguish- }
+   { able without watching.  So watch, in short slices, stopping the instant   }
+   { the reading moves: a healthy clock costs at most the tail of the current  }
+   { second, and only a stopped one costs the full 1.6.                        }
+   {                                                                           }
+   { Delay_Time rather than a LetOthersRun spin: it is the OS's own cooperative}
+   { sleep, it costs no CPU while it waits, and it is what the Clock's timer   }
+   { subprocess uses to sit out the rest of a minute (APCL-TIMER.TEXT:41) --   }
+   { from a process that is likewise non-preemptive and attached to the WM, so }
+   { no Sched_Class bracket is needed here.  Its clktime argument is ignored   }
+   { whenever the interval is non-zero (same line), but it is a value          }
+   { parameter and must still be a real record, so we hand it a clock reading. }
+   tries   := 0;
+   iv.sec  := 0;
+   iv.msec := clkWaitMs;
+   Get_Time(err, nowT);
+   repeat
+      Delay_Time(err, iv, nowT);
+      tries   := tries + 1;
+      clkRuns := ClockSecs <> clkBaseSecs  { the baseline still IS "now": the  }
+                                           { test above just proved them equal }
+   until clkRuns or (tries >= clkTries);
+
+   { A new baseline for the next attempt: if the player goes off to set the    }
+   { clock and comes back, that next attempt should be able to answer from the }
+   { free evidence again.  (A stopped clock keeps handing back the same        }
+   { reading, so this is a no-op in the case that matters.)                    }
+   clkBaseSecs := ClockSecs;
+
+   ClockIsRunning := clkRuns
 end;
 
 procedure PutUpScrapMenus;

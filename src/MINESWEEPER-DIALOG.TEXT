@@ -422,7 +422,12 @@ begin
    InsetRect(inner, 2, 2);
    FrameRect(inner);
 
-   { Title, centered, bold.                                                   }
+   { Title, centered, bold.  For the record dialog this is only the first     }
+   { half of what we have to say ("A new record!"); the instruction half      }
+   { ("Type your name.") is drawn below the box further down.  One line       }
+   { carrying both is wider than the 190-pixel panel, and widening the panel  }
+   { is not an option -- it has to fit the Beginner window (see the geometry  }
+   { constants above) -- so the box sits in the middle of the sentence.       }
    if isCustom then GetPhrase(phCustomTitle, s)
                else GetPhrase(phNameTitle, s);
    TextFace([bold]);
@@ -449,7 +454,16 @@ begin
    else begin
       FieldBoxAround(fldName);
       if curFld = fldName then DrawField(fldName, dlgFSH, true, true)
-                          else DrawField(fldName, nil, false, true)
+                          else DrawField(fldName, nil, false, true);
+
+      { The instruction half of the prompt, centered under the box -- plain,  }
+      { not bold: the bold line above it is the news, this is the request.    }
+      { Baselined a few pixels under the box's frame, which ends at           }
+      { top + 30 + fBoxH (LayoutPanel's row 0), and clear of the buttons.     }
+      GetPhrase(phNamePrompt, s);
+      MoveTo((panelR.left + panelR.right - StringWidth(s)) div 2,
+             panelR.top + 30 + fBoxH + 6 + fi.ascent);
+      DrawString(s)
    end;
 
    OneButton(cancelR, 0, false);          { button 0 is ALWAYS Cancel - 06-lib-am }

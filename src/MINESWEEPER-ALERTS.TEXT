@@ -26,8 +26,10 @@
 ; in MSGlobals -- a mismatch is only warning -3076.  Bump both together.
 ; (Bumped 2 -> 3 when the printing items, alert 60 and the scrap menu were
 ; added: an old PHRASE file has no menu 5, and inserting a menu that InitMP
-; never filled in would crash, so the stamp records the pairing.)
-3
+; never filled in would crash, so the stamp records the pairing.
+; Bumped 3 -> 4 for alert 70 -- the stopped-clock refusal -- and phrase 916,
+; the second half of the record dialog's prompt: an old file has neither.)
+4
 ; cacheSize: resident alert-text slots, and cacheBytes: the cache's heap byte
 ; budget.  InitMP reads these two lines and passes them to InitAlerts.
 ; *** ESTIMATES.  The Alert tool prints suggested InitAlerts(slots, bytes,..)
@@ -110,6 +112,14 @@ picture it prints.  You may be able to make more room on this disk.  Refer
 to the Lisa Office System manual, Appendix A, Office System Error Messages,
 under Insufficient Room on Disk.
 
+; -- The clock is not running, so a game cannot be timed (ClockIsRunning in
+;    MINESWEEPER-GLOBALS).  Minesweeper cannot set the clock itself -- set_time
+;    is a privileged system call -- so this alert names the tool that can.
+70 stop alert
+Minesweeper times your games with the clock in this Lisa, and that clock is not
+running.^L^L
+Set the date and time with the Clock tool, then start your game again.
+
 ; ==== GET PHRASES ============================================================
 ; Number-only headers: stageless, exactly ONE verbatim text line each, no
 ; escape expansion; fetched with GetAlert (06-lib-am).  901-909 are reserved
@@ -141,16 +151,23 @@ Height
 912
 Mines
 
-; -- 913/914: the two dialog titles.
+; -- 913/914: the two dialog titles.  914 is only the FIRST half of the
+;    record dialog's prompt; 916 below is the rest of it.
 913
 Custom Level
 
 914
-A new record!  Type your name for the book:
+A new record!
 
 ; -- 915: the Best Times line for a level nobody has won yet.
 915
 No best time yet...
+
+; -- 916: the second half of the record dialog's prompt, drawn UNDER the name
+;    box (914 goes above it).  Split in two because the whole sentence on one
+;    line is wider than the panel.
+916
+Type your name.
 
 0
 ; ==== MENUS ==================================================================
