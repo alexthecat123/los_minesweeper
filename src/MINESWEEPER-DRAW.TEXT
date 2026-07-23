@@ -27,8 +27,15 @@
 {      cannot hold its own against the cover's dither (see DrawQueryGlyph);    }
 {    - the fatal mine sits on an INVERTED cell (white mine on black): the      }
 {      strongest emphasis a 1-bit screen has;                                  }
-{    - a wrong flag (flag on a non-mine, shown after a loss) is a mine with    }
-{      an X struck through it, as in the original;                             }
+{    - a RIGHT flag (flag on a mine, after a loss) keeps its pennant but       }
+{      trades the bevel for a solid black cell: a white flag on black, so it   }
+{      reads as "there really was a mine here" without losing the flag;        }
+{    - a wrong flag (flag on a non-mine) is left EXACTLY as the player left    }
+{      it, even after a loss.  The original crosses it out with a mine and     }
+{      an X; that was tried here and abandoned -- at 21 x 14 on a 1-bit        }
+{      screen, a strike thin enough to leave the mine legible is itself too    }
+{      faint to see, and one heavy enough to see buries the mine.  A flag      }
+{      still standing next to the exposed mines says the same thing;           }
 {    - the whole board wears a 1-pixel black frame so it sits ON the window    }
 {      instead of floating in it.                                              }
 {                                                                              }
@@ -110,7 +117,7 @@ procedure DrawCell (c, r : integer);
 { DrawDirtyCells -- repaint exactly the cells MSGame marked with MarkDirty    }
 { since the last repaint, and clear the marks.  This is how EVERY move        }
 { reaches the screen: a reveal that opens three cells costs three cells of    }
-{ drawing, and a loss costs the mines and the wrong flags.  If you are adding }
+{ drawing, and a loss costs the mines and nothing else.  If you are adding    }
 { a move that changes the board, mark what you change and call this -- do not }
 { reach for DrawBoard, which exists for a different problem (see it).         }
 procedure DrawDirtyCells;
@@ -121,7 +128,7 @@ procedure DrawDirtyCells;
 { gone and every cell must be put back regardless of whether the game         }
 { changed it.  540 cells of QuickDraw takes a visible moment on a 68000, so   }
 { no MOVE should ever come through here -- not even a loss, which changes     }
-{ only the mines and the wrong flags.  Moves use DrawDirtyCells.              }
+{ only the mines.  Moves use DrawDirtyCells.                                  }
 procedure DrawBoard;
 
 { DrawCounter -- the left-hand 3-digit readout: mines minus flags.            }
@@ -402,13 +409,21 @@ end;
 {  DrawFlagGlyph -- the flag: a triangular pennant on a staff with a base.    }
 {  The pennant is drawn as three raster lines of shrinking length -- cheaper  }
 {  and crisper at this size than a QuickDraw polygon would be.                }
+{                                                                              }
+{  whiteInk draws the whole glyph in WHITE instead of black, for the one cell  }
+{  that needs it: a right flag after a loss, which sits on a black cell.  The  }
+{  glyph is nothing but pen lines, so the ink is just the pen pattern -- and   }
+{  setting it here (rather than inverting the finished cell) means the caller  }
+{  never has to reason about what was underneath.  The pen goes back to        }
+{  normal on the way out; nobody downstream inherits a white pen.              }
 {------------------------------------------------------------------------------}
 
-procedure DrawFlagGlyph (var box : Rect);
+procedure DrawFlagGlyph (var box : Rect; whiteInk : boolean);
 var staffX : integer;
     i      : integer;
 begin
    PenNormal;
+   if whiteInk then PenPat(white);
    { The staff stands just right of center so the pennant (which flies left)  }
    { balances the glyph in the cell.                                          }
    staffX := box.left + cellW div 2 + 3;
@@ -424,7 +439,8 @@ begin
    for i := 0 to 2 do begin
       MoveTo(staffX - 8 + 2 * i, box.top + 3 + i);
       LineTo(staffX - 1, box.top + 3 + i)
-   end
+   end;
+   PenNormal                        { black pen back for whoever draws next }
 end;
 
 {------------------------------------------------------------------------------}
@@ -573,15 +589,21 @@ begin
          {   - mid-game: the player's mark, if any -- a flag or a "?";        }
          {   - after a LOSS: every unflagged mine is exposed (drawn on the    }
          {     bevel -- the cells stay unrevealed in the data, this is purely }
-         {     presentation), and a flag on a NON-mine is shown as a mine     }
-         {     with an X through it: "this flag was wrong".                   }
+         {     presentation); and a flag that was RIGHT (a mine underneath)   }
+         {     keeps its pennant but sits on a BLACKED-OUT cell -- a white    }
+         {     flag on black, so "you called this one" reads at a glance and  }
+         {     pairs with the fatal mine's own black cell.                    }
          {                                                                    }
-         { A "?" is not a flag in either rule, and both readings of that are  }
-         { the ones we want.  A mine under a "?" is exposed like any other    }
-         { unflagged mine -- the "?" simply gives way to it.  A "?" on a      }
-         { blank is never called wrong, because it never claimed anything:    }
-         { the mark just stays put.  Only flags are ever X'd out, which is    }
-         { what the original does too.                                        }
+         { Nothing here contradicts the player.  A flag on a NON-mine is left }
+         { standing exactly as it was -- see the note at the top of the file  }
+         { for why the original's crossed-out mine does not survive this      }
+         { screen.  So the only marks a loss ever touches are the ones that   }
+         { hide a mine, which is also why MSGame marks only the mines dirty   }
+         { for a loss (RevealCell).                                           }
+         {                                                                    }
+         { A "?" needs no case of its own.  A mine under a "?" is exposed     }
+         { like any other unflagged mine -- the "?" simply gives way to it.   }
+         { A "?" on a blank stays put, the open question it always was.       }
          showMine := false;
          if state = msLost then
             if cells[r, c].isMine and (cells[r, c].playerMark <> pmFlag) then
@@ -590,16 +612,27 @@ begin
          if showMine then
             DrawMineGlyph(box)
          else if cells[r, c].playerMark = pmFlag then begin
-            if (state = msLost) and (not cells[r, c].isMine) then begin
-               DrawMineGlyph(box);              { the mine that wasn't there ... }
-               PenNormal;                       { ... struck through corner to corner }
-               MoveTo(box.left + 3, box.top + 2);
-               LineTo(box.right - 4, box.bottom - 3);
-               MoveTo(box.right - 4, box.top + 2);
-               LineTo(box.left + 3, box.bottom - 3)
+            if (state = msLost) and cells[r, c].isMine then begin
+               { A flag that was RIGHT: keep the pennant, lose the bevel.  The }
+               { cell goes solid black with a white flag on it -- the same     }
+               { "there was a mine here" voice the fatal cell speaks, but the  }
+               { player's own call is left standing on top of it.              }
+               {                                                               }
+               { Painted, not inverted: FillRect takes its pattern as an       }
+               { argument, so this owes nothing to the port's background       }
+               { pattern (EraseRect does) and nothing to what the bevel code   }
+               { left underneath (InvertRect would).  White ring first, black  }
+               { interior second -- the 1-px seam stays light, exactly as the  }
+               { fatal mine's does, so the two black cells sit on the grid the }
+               { same way.                                                     }
+               FillRect(box, white);            { wipe the bevel, keep the seam }
+               inner := box;
+               InsetRect(inner, 1, 1);
+               FillRect(inner, black);          { solid black interior }
+               DrawFlagGlyph(box, true)         { white pennant on it }
             end
             else
-               DrawFlagGlyph(box)
+               DrawFlagGlyph(box, false)
          end
          else if cells[r, c].playerMark = pmQuery then
             DrawQueryGlyph(box)

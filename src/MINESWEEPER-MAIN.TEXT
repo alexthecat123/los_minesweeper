@@ -217,21 +217,6 @@ begin
 end;
 
 {------------------------------------------------------------------------------}
-{  Num3Str -- integer 0..999 as exactly three digits, zero-padded ('007').    }
-{  The best-times lines use this so the columns align in the alert box.       }
-{------------------------------------------------------------------------------}
-
-procedure Num3Str (n : integer; var s : Str255);
-begin
-   if n < 0 then n := 0;                 { defensive; times are never negative }
-   if n > 999 then n := 999;
-   s := '000';
-   s[1] := chr(ord('0') + n div 100);
-   s[2] := chr(ord('0') + (n div 10) mod 10);
-   s[3] := chr(ord('0') + n mod 10)
-end;
-
-{------------------------------------------------------------------------------}
 {  UpdateElapsed -- bring myDoc^.elapsed up to date from the real clock.      }
 {  elapsed = ClockSecs - startRef, both in seconds off the battery-backed     }
 {  clock/calendar (MSGlobals, ClockSecs -- read that first; it is where the   }
@@ -443,7 +428,7 @@ end;
 
 {------------------------------------------------------------------------------}
 {  ShowBestTimes -- the Best Times alert.  Formats each fixed level as ONE    }
-{  string ('012  Alex') so three ParamAlert slots cover all three levels --   }
+{  string ('Alex - 12s') so three ParamAlert slots cover all three levels --  }
 {  ^1/^2/^3 in alert 30's text.  A level with no record shows the phrase-     }
 {  file's placeholder line instead.                                           }
 {------------------------------------------------------------------------------}
@@ -459,10 +444,17 @@ var s1, s2, s3 : Str255;
          GetAlert(allAlerts, phNoBest, @s)   { localized "none yet" - 06-lib-am }
       end
       else begin
-         Num3Str(myDoc^.bestTime[lv], t);    { zero-padded so columns align }
-         s := concat(t, '  ', myDoc^.bestName[lv])
-         { The two spaces are layout, not language; the words all came from   }
-         { the phrase file or the player.                                     }
+         NumToStr(myDoc^.bestTime[lv], t);   { 78, 125 -- no leading zeros }
+         if length(myDoc^.bestName[lv]) = 0 then
+            s := concat(t, 's')              { unsigned record -- the name    }
+                                             { dialog takes an empty field,   }
+                                             { and " - 78s" would read as a   }
+                                             { missing word rather than as a  }
+                                             { record nobody signed           }
+         else
+            s := concat(myDoc^.bestName[lv], ' - ', t, 's')
+         { The dash and the "s" are layout, not language; the words all came  }
+         { from the phrase file or the player.                                }
       end
    end;
 
@@ -514,13 +506,14 @@ end;
 {------------------------------------------------------------------------------}
 {  DoLose -- the game was just lost.  NO modal box: a loss happens dozens of  }
 {  times an hour and an alert on every one would be intolerable.  The board   }
-{  tells the story (every mine exposed, the fatal one inverted, wrong flags   }
-{  crossed out -- MSDraw), the face dies, and a medium beep marks the moment  }
-{  (BeepAlert honours the user's beep-vs-flash preference, 06-lib-am).        }
+{  tells the story (every mine exposed, the fatal one inverted, a right flag  }
+{  left standing on a blacked-out cell -- MSDraw), the face dies, and a       }
+{  medium beep marks the moment (BeepAlert honours the user's beep-vs-flash   }
+{  preference, 06-lib-am).                                                    }
 {                                                                              }
 {  It is worth being clear about what "every mine exposed" costs, because it   }
 {  is the one moment that looks like it needs the whole board: it does not.    }
-{  A loss changes the mines and the wrong flags.  It does not change the       }
+{  A loss changes the mines and only the mines.  It does not change the        }
 {  numbers the player already opened, and it does not change the covers over   }
 {  the empty cells they never got to -- those are most of the board, and they  }
 {  are already correct on the screen.  So this goes through the dirty list     }
@@ -529,12 +522,12 @@ end;
 
 procedure DoLose;
 begin
-   DrawDirtyCells;                       { the mines and the wrong flags -- and   }
-                                         { only those.  RevealCell marked them    }
-                                         { when it set state := msLost; see the   }
-                                         { note there for which cells a loss      }
-                                         { actually changes and which it leaves    }
-                                         { looking exactly as they already did.    }
+   DrawDirtyCells;                       { the mines -- and only those.           }
+                                         { RevealCell marked them when it set     }
+                                         { state := msLost; see the note there    }
+                                         { for which cells a loss actually        }
+                                         { changes and which it leaves looking    }
+                                         { exactly as they already did.           }
    DrawFace(false);                      { X eyes }
    BeepAlert(2)                          { medium: audible but not alarming }
 end;

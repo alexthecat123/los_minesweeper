@@ -80,7 +80,7 @@ Start a new game?  The game in progress will be lost.
 You won! You swept all ^1 mines in ^2 seconds.
 
 ; -- Best Times.  ^1/^2/^3 are one preformatted line per fixed level
-;    ("012  Alex", or phrase 915's text when a level has no record yet).
+;    ("Alex - 12s", or phrase 915's text when a level has no record yet).
 30 note alert
 The best times so far!!!^L^L
 Beginner:  ^1^L

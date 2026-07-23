@@ -296,32 +296,32 @@ begin
 
          { A loss changes more cells than the one that was clicked, without    }
          { touching their data at all: MSDraw reads state = msLost and paints  }
-         { the hidden mines through their covers, and X's out the flags that   }
-         { turned out to be wrong.  The cells did not change -- what they LOOK }
-         { LIKE did -- so nothing else in this routine would ever mark them,   }
-         { and this is the one place that knows the loss just happened.        }
+         { the hidden mines through their covers.  The cells did not change -- }
+         { what they LOOK LIKE did -- so nothing else in this routine would    }
+         { ever mark them, and this is the one place that knows the loss just  }
+         { happened.                                                           }
          {                                                                     }
-         { Exactly which cells?  The ones where isMine and "carries a FLAG"    }
-         { disagree.  An unflagged mine was a blank cover a moment ago and is  }
-         { a mine now; a flagged blank was a flag and is now a mine with a     }
-         { line through it.  The other two combinations are already telling    }
-         { the truth: a correctly flagged mine still shows the same flag it    }
-         { showed before the loss, and a plain covered blank stays a plain     }
-         { covered blank.  Leaving those two alone is what keeps this cheap -- }
-         { on a full Expert board it is 99 mines and a few bad flags, not 480  }
-         { cells.                                                              }
+         { Exactly which cells?  The mines, and nothing else.  An unflagged    }
+         { mine was a blank cover a moment ago and shows its mine now.  A      }
+         { FLAGGED mine keeps its flag but not its LOOK -- MSDraw blacks the   }
+         { cell out under a right flag once the game is lost -- so it needs    }
+         { the repaint too, and it is a mine, so the one test catches it.      }
+         { (That combination is the easy one to talk yourself out of marking:  }
+         { the data really is unchanged and the flag really does stay a flag.  }
+         { It still has to be repainted, because the CELL UNDER it changed     }
+         { colour.)                                                            }
          {                                                                     }
-         { The query mark needs no case of its own, which is the whole reason  }
-         { the test reads "= pmFlag" rather than "<> pmNone".  A "?" on a mine }
-         { counts as unflagged here and so is repainted -- correctly, since    }
-         { the mine now shows through it.  A "?" on a blank counts as          }
-         { unflagged too and so is left alone -- also correct: it was never a  }
-         { claim that could BE wrong, so the loss leaves it standing as the    }
-         { open question it always was.  (The original does the same: only     }
-         { flags get X'd out.)                                                 }
+         { Everything that is NOT a mine is left alone, and that is not just   }
+         { an optimisation -- it is the drawing rule stated in data terms.     }
+         { MSDraw contradicts nothing the player marked: a flag on a blank     }
+         { stays the flag they placed, a "?" on a blank stays a "?".  Neither  }
+         { changes, so neither is marked.  A "?" on a MINE is marked, for      }
+         { being a mine -- correctly, since the mine now shows through it.     }
+         {                                                                     }
+         { What it costs: on a full Expert board, 99 cells, not 480.           }
          for rr := 1 to rows do
             for cc := 1 to cols do
-               if cells[rr, cc].isMine <> (cells[rr, cc].playerMark = pmFlag) then
+               if cells[rr, cc].isMine then
                   MarkDirty(cc, rr);
          exit(RevealCell)
       end;
