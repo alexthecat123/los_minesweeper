@@ -22,7 +22,7 @@
 ; =============================================================================
 ;
 ; ---- FILE HEADER ------------------------------------------------------------
-; Version stamp: any integer; compared at run time against alertVerNum (= 3)
+; Version stamp: any integer; compared at run time against alertVerNum (= 4)
 ; in MSGlobals -- a mismatch is only warning -3076.  Bump both together.
 ; (Bumped 2 -> 3 when the printing items, alert 60 and the scrap menu were
 ; added: an old PHRASE file has no menu 5, and inserting a menu that InitMP

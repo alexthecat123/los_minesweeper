@@ -265,17 +265,36 @@ end;
 {------------------------------------------------------------------------------}
 
 { DropFocus -- take the caret away and pack the field (ExitField).  Safe to   }
-{ call when nothing has focus.  After this, FieldText may be used on the      }
-{ field.                                                                       }
+{ call when nothing has focus, AND safe to call when the window has gone --   }
+{ see below.  After this, FieldText may be used on the field.                 }
 
 procedure DropFocus;
 begin
    if curFld <> nil then begin
-      SetPort(myWindow);
-      ClipRect(myWindow^.portRect);
-      ExitField(curFld, dlgFSH);          { turn off highlight, close the gap,  }
+
+      { THE WINDOW MAY BE GONE.  A dialog's teardown runs after RunDialog      }
+      { returns, and one of the ways RunDialog returns is the Filer closing us }
+      { out from under the panel: DlgProcessEvent's filerEvent arm folds an    }
+      { fcClose into a Cancel, and by then HandleFilerOp has already handed    }
+      { the window back and set myWindow to nil (MSGlobals).  Un-highlighting  }
+      { and repainting a field then has nowhere to happen -- and 'SetPort(nil) }
+      { ; ClipRect(myWindow^.portRect)' is a nil dereference, not a no-op.     }
+      {                                                                        }
+      { The BOOKKEEPING still has to be done in that case, which is why it     }
+      { sits outside the guard: forgetting curFld is what stops the next       }
+      { dialog from opening in the belief that a field it never selected still }
+      { holds the caret.  Skipping ExitField costs nothing here either -- its  }
+      { job is to pack the characters so FieldText can read them (trap 2), and }
+      { the only caller that reads them runs on the OK path, which a           }
+      { Filer-forced Cancel never reaches.                                     }
+      if myWindow <> nil then begin
+         SetPort(myWindow);
+         ClipRect(myWindow^.portRect);
+         ExitField(curFld, dlgFSH);       { turn off highlight, close the gap,  }
                                           { pack chars left - 06-lib-fe         }
-      DrawField(curFld, nil, false, true);{ repaint without selection           }
+         DrawField(curFld, nil, false, true)  { repaint without selection       }
+      end;
+
       curFld := nil;
       blinkT := -1                        { nothing to blink }
    end
@@ -921,9 +940,17 @@ begin
             { Redraw the damaged area: window contents first, panel on top.   }
             { BeginUpdate clips everything to the damage, so this is cheap    }
             { even though it names the whole window (06-lib-wm-a).            }
+            {                                                                 }
+            { Only OUR window gets the board painted into it.  An update for  }
+            { anything else must still be CONSUMED -- an update region left   }
+            { unanswered is simply re-sent, and the loop would spin on it --  }
+            { but the board is ours to draw in our own window and nowhere     }
+            { else, so the bracket runs empty.                                }
             BeginUpdate(theEvent.who);
-            DrawContents(theEvent.who);
-            if theEvent.who = myWindow then DrawPanel;
+            if theEvent.who = myWindow then begin
+               DrawContents(theEvent.who);
+               DrawPanel
+            end;
             EndUpdate(theEvent.who)
          end;
 
@@ -1046,6 +1073,14 @@ begin
    { the right size that InitFState/SelectAll will fill (exactly the         }
    { Calculator's move, APHP-HP.TEXT:2067: pointer(ord(newHandle(...)))).    }
    dlgFSH := pointer(ord(NewHandle(sizeof(fieldState))));
+   if dlgFSH = nil then begin
+      { NewHandle answers nil on a full heap, exactly as CreateField does --  }
+      { and EVERY Field Editor call below is handed this state.  A nil that   }
+      { gets past here is not a failure, it is a nil dereference at the       }
+      { first keystroke; report it now, like the fields above.                }
+      err := FEallocationFailed;
+      exit(InitDialogs)
+   end;
 
    curFld := nil;
    blinkT := -1
@@ -1094,7 +1129,18 @@ begin
 
    SetDlgMenuState(false);                { menus back to normal }
    DropFocus;                             { no caret survives the dialog }
-   DrawContents(myWindow);                { lift the panel off the board }
+
+   { Lift the panel off the board -- unless there is no longer a board to     }
+   { lift it off.  The Filer can end a dialog from underneath us: fcClose     }
+   { hands the window back (myWindow := nil) and fcTerminate ends the loop,   }
+   { and DlgProcessEvent folds either into a Cancel, so 'accepted' is already }
+   { false and there is nothing to repaint for.  DrawContents copes with a    }
+   { nil window on its own (RenderImage exits on it), but a repaint on the    }
+   { way to the grave is wasted work at the one moment the Filer is waiting   }
+   { on us -- and reading myDoc^ to do it is not worth the argument.          }
+   if (myWindow <> nil) and (not toldToDie) then
+      DrawContents(myWindow);
+
    DoCustomDialog := accepted
 end;
 
@@ -1124,7 +1170,9 @@ begin
    end;
 
    SetDlgMenuState(false);
-   DrawContents(myWindow)                 { lift the panel }
+   if (myWindow <> nil) and (not toldToDie) then
+      DrawContents(myWindow)              { lift the panel -- see the same     }
+                                          { guard in DoCustomDialog for why    }
 end;
 
 end.

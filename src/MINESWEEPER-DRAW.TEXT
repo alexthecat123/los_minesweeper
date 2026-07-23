@@ -392,8 +392,28 @@ begin
 
    PenNormal;
    { The spokes first, so the body paints over their inner ends cleanly.      }
+   {                                                                          }
+   { THE VERTICAL SPOKE STOPS AT +-5 WHERE 3:2 WANTS +-6, AND THE MISSING     }
+   { PIXEL IS DELIBERATE.  A QuickDraw line includes BOTH endpoints -- its    }
+   { LINERECT is the box bounding the two points with the pen size added to   }
+   { right and bottom (libqd-DRAWLINE.TEXT:115-132) -- so +-6 paints 13 rows. }
+   { The cell is only 14 rows tall and cy lands on box.top+7, which puts the  }
+   { bottom endpoint on box.bottom-1: the GRID SEAM.  Harmless on a covered   }
+   { cell, where that seam is already the black shadow line -- but the fatal  }
+   { mine is drawn and then INVERTED one pixel in (DrawCell), deliberately    }
+   { leaving the seam alone so the black cell sits on the grid the same way   }
+   { the right-flag cell does.  A 13-row spoke does not fit in the 12 rows    }
+   { the inversion covers, and the overhanging pixel stayed black: one stray  }
+   { dot in the white seam under every fatal mine.  +-5 fits, with a row to   }
+   { spare.                                                                   }
+   {                                                                          }
+   { Only the vertical is touched.  The horizontal (+-9 = box.left+1 ..       }
+   { box.right-2) and the diagonals (+-7, +-5) already land inside the        }
+   { inverted region, and they are what carry the burst's shape -- each       }
+   { spoke is a stub poking 1 to 3 pixels out of the 12 x 8 body, so one      }
+   { pixel off the shortest of them is not a shape anyone can see.            }
    MoveTo(cx - 9, cy);      LineTo(cx + 9, cy);       { horizontal: +-9        }
-   MoveTo(cx, cy - 6);      LineTo(cx, cy + 6);       { vertical:   +-6 (3:2!) }
+   MoveTo(cx, cy - 5);      LineTo(cx, cy + 5);       { vertical:   +-5, see above }
    MoveTo(cx - 7, cy - 5);  LineTo(cx + 7, cy + 5);   { diagonals, foreshortened }
    MoveTo(cx - 7, cy + 5);  LineTo(cx + 7, cy - 5);   { the same way            }
 
@@ -680,10 +700,17 @@ begin
    { Every cell is now on the screen exactly as the document describes it, so  }
    { nothing is owed a repaint.  Clearing here is what lets a caller reach     }
    { for DrawBoard without also having to think about the dirty list.          }
-   { UNLESS the repaint was redirected somewhere that is not the screen        }
-   { (recording a Copy/Print picture): the marks say what the WINDOW owes the  }
-   { document, and painting a picture pays none of that debt.                  }
-   if (imagePort = nil) or (imagePort = myWindow) then
+   { UNLESS this pass was RECORDING rather than painting (the Copy or Print    }
+   { picture): the marks say what the WINDOW owes the document, and painting   }
+   { a picture pays none of that debt.                                         }
+   {                                                                           }
+   { The test is picRecording (MSGlobals) and NOT anything about imagePort,    }
+   { which is what it used to be and could never have worked: both picture     }
+   { routines record on myWindow's own port, so 'imagePort = myWindow' is      }
+   { just as true while recording as it is during an ordinary repaint, and     }
+   { the guard let every recording clear the list.  Only the caller knows      }
+   { which of the two it is doing, so only the caller can say.                 }
+   if not picRecording then
       ClearDirty;
 
    { The 1-pixel black frame, one pixel OUTSIDE the cells, so the board sits  }

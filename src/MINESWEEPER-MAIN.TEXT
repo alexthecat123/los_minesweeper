@@ -104,6 +104,16 @@ var
    nextClkPoll : longint;   { Time value at which UpdateTimer may next read    }
                             { the real clock; see clkPollDelay above.          }
 
+   termErr   : integer;     { results of the shutdown Close_DataSeg and its    }
+   termSched : integer;     { Sched_Class bracket, at the very bottom of the   }
+                            { program.  Kept apart from each other for the     }
+                            { reason Initialize keeps its own err and schedErr }
+                            { apart: a restore call must not overwrite the     }
+                            { result of the call that did the work.  (Neither  }
+                            { is testable at that point -- we are on the way   }
+                            { out and there is nothing left to do about a      }
+                            { failure -- but naming them says which is which.) }
+
 
 {==============================================================================}
 {  The three required callbacks (03-app-template section 10)                   }
@@ -679,6 +689,30 @@ begin
                                          { gesture never worried it in the     }
                                          { first place                         }
       end
+
+      else if myDoc^.cells[r, c].playerMark = pmFlag then begin
+         { A REVEAL aimed at a FLAGGED cell.  RevealCell will refuse it -- a  }
+         { flag protects the cell from mis-clicks, which is the entire point  }
+         { of planting one -- so the move is over before it starts.           }
+         {                                                                    }
+         { The refusal has to happen HERE and not one level down, because     }
+         { the first-click ceremony below would otherwise run in full for a   }
+         { cell that never opens: PlaceMines would lay the mines with the     }
+         { guaranteed-safe 3x3 halo centred on a cell the player has already  }
+         { decided NOT to open, the stopwatch would start, and the game would }
+         { go to msPlaying with not one cell revealed.  The player's real     }
+         { first reveal would then be an ordinary mid-game click on an        }
+         { unprotected board -- and could be a mine on the very first cell    }
+         { they open, which is precisely what first-click safety exists to    }
+         { make impossible (PlaceMines, MSGame).                              }
+         {                                                                    }
+         { No early exit: this WAS a click, and it falls through to the       }
+         { lastClk bookkeeping at the bottom like any other.  All it owes the }
+         { board is the worried face, put back the way every other abandoned  }
+         { move puts it back.                                                 }
+         if worried then DrawFace(false)
+      end
+
       else begin
          { A reveal -- the move the worried face has been waiting on.         }
 
@@ -916,25 +950,52 @@ begin
    GetPort(savePort);
    SetPort(myWindow);                    { any valid port will do for recording }
    SetRect(frame, 0, 0, contentW, contentH);
+   picRecording := true;                 { we are RECORDING, not painting: tells }
+                                         { DrawBoard to leave the dirty list     }
+                                         { alone (MSGlobals, MSDraw.DrawBoard)   }
    pic := OpenPicture(frame);            { start recording (pen hides) }
    RenderImage(myWindow);                { the full repaint, captured as opcodes }
    FrameImage(myWindow);                 { ... and box it: on paper or pasted    }
                                          { there is no window frame to bound it  }
    ClosePicture;                         { stop recording (pen shows) }
+   picRecording := false;
 
-   PutGrScrap(pic, scrErr);              { publish: ScrapUG joins CurrScrapSet }
+   { The scrap's zone can fill up mid-recording, and then ClosePicture hands   }
+   { back nil.  Publishing that would put a NIL HANDLE on the clipboard and    }
+   { the dereference would land later and somewhere else -- on the next paste, }
+   { or on the scrap window's own repaint -- which is the worst shape a        }
+   { failure can take.  So: publish nothing.  EraseScrapData has already left  }
+   { the scrap empty-but-consistent, which is the honest report (an empty      }
+   { clipboard IS what a failed copy means), and no alert is raised because    }
+   { the only thing we could say is that the board did not fit in the room     }
+   { left on the disk.  DoPrintBoard makes the same test at the same point.    }
+   if pic <> nil then
+      PutGrScrap(pic, scrErr);           { publish: ScrapUG joins CurrScrapSet.  }
+                                         { STILL on the scrap's heap -- the      }
+                                         { handle it files away belongs in the   }
+                                         { scrap's segment, same reason the      }
+                                         { recording did                         }
 
    SetHeap(saveHz);                      { our own allocations come from our    }
                                          { heap again                           }
    EndPutScrap(scrErr);                  { segment back to read-only, pageable }
 
-   DrawUScrap(scrErr);                   { if the scrap window is open on the   }
+   if pic <> nil then
+      DrawUScrap(scrErr);                { if the scrap window is open on the   }
                                          { desktop, show the new contents now   }
                                          { (draws nothing when it is hidden --  }
                                          { an empty visRgn clips it all away);  }
                                          { later damage comes back to us as     }
                                          { folderUpdates on scrapFolder, which  }
-                                         { DrawWindowScrap services             }
+                                         { DrawWindowScrap services.  Guarded   }
+                                         { because DrawUScrap is the painter for }
+                                         { a scrap that HOLDS a picture -- it is }
+                                         { the arm DrawWindowScrap takes only    }
+                                         { when ScrapUG is in CurrScrapSet -- and }
+                                         { nothing was published on this path.    }
+                                         { The window catches up on its next      }
+                                         { update either way                      }
+
    SetPort(savePort)
 end;
 
@@ -1134,11 +1195,14 @@ begin
 
    SetPort(myWindow);
    SetRect(frame, 0, 0, contentW, contentH);
+   picRecording := true;                 { RECORDING, not painting -- see the    }
+                                         { same bracket in DoCopyBoard           }
    pic := OpenPicture(frame);
    RenderImage(myWindow);
    FrameImage(myWindow);                 { the box travels with the picture, so  }
                                          { it scales onto the page with it       }
    ClosePicture;
+   picRecording := false;
 
    SetHeap(saveHz);                      { our allocations are ours again }
 
@@ -1417,8 +1481,22 @@ begin
          { live board (DrawWindowScrap, MSDraw).                              }
          if theEvent.who = scrapFolder then
             DrawWindowScrap(true)
-         else
-            doUpdateEvent(true, theEvent.who);
+         else if theEvent.who = myWindow then
+            doUpdateEvent(true, theEvent.who)
+         else begin
+            { Neither of ours.  This is not paranoia about a window we never  }
+            { had: it is the update that was already QUEUED for the loan when }
+            { Save & Put Away handed it back to the Filer (see miPutAway,     }
+            { which sets myWindow to nil).  The event arrives afterwards, and }
+            { painting our board into a window that now belongs to somebody   }
+            { else is the one outcome worse than not painting at all.         }
+            {                                                                 }
+            { It must still be CONSUMED, though -- an update region left      }
+            { unanswered is simply re-sent, and the loop would spin on it --  }
+            { so the bracket runs empty.                                      }
+            BeginUpdate(theEvent.who);
+            EndUpdate(theEvent.who)
+         end;
 
       folderMoved :
          { The user dragged the window.  We cache no global coordinates       }
@@ -1449,6 +1527,98 @@ begin
          { beats relying on unmatched-case behaviour.                        }
 
    end { case }
+end;
+
+
+{------------------------------------------------------------------------------}
+{  DocIsSane -- does the reopened data segment actually DESCRIBE a board?      }
+{                                                                              }
+{  The version stamp (step 11 below) proves the segment was written by a build }
+{  that laid the record out the way we read it.  It does not prove the CONTENT }
+{  means anything, and the two failures are different: a segment can carry a   }
+{  perfectly good stamp and garbage everywhere else, because the stamp is      }
+{  written once, at creation, and the -321 "left open across a crash" warning  }
+{  exists precisely to say that what came after it may not have landed.        }
+{                                                                              }
+{  Trusting the content is not a small risk here, because almost every loop in }
+{  the program is bounded by numbers that live in it.  A corrupt 'rows' sends  }
+{  DrawBoard's 'for r := 1 to myDoc^.rows' straight past maxRows and indexes   }
+{  cells[] out of range; a corrupt 'level' gets past DoWin's 'level <> lvCustom'}
+{  guard and indexes bestTime[] out of range; a corrupt playerMark falls       }
+{  through every arm of CycleMark's case.  MSDraw and MSGame compile at the    }
+{  default $R+, so those are range-check traps rather than silent corruption   }
+{  -- but a trap at launch is still a tool that cannot be opened, and the only }
+{  way out for the user is to find and throw away the data segment by hand.    }
+{  Checking costs one pass over the board once per launch.                     }
+{                                                                              }
+{  A failure here is not an error to report: it means the same thing a bad     }
+{  stamp means -- "there is no game in here" -- and takes the same exit, which }
+{  is to deal a fresh Beginner board and keep the tool usable.                 }
+{                                                                              }
+{  NOTE THE SHAPE: dimensions first, alone, and everything that multiplies     }
+{  them after.  Lisa Pascal does not short-circuit 'and' (both operands of a   }
+{  boolean operator are evaluated), so a single expression would compute       }
+{  cols * rows on the garbage it was about to reject.                          }
+{------------------------------------------------------------------------------}
+
+function DocIsSane : boolean;
+var lim  : integer;                      { cols * rows, once both are trusted }
+    lv   : MSLevel;
+    c, r : integer;
+begin
+   DocIsSane := false;
+   with myDoc^ do begin
+
+      { The two numbers every loop in the program is bounded by. }
+      if (cols < 1) or (cols > maxCols) then exit(DocIsSane);
+      if (rows < 1) or (rows > maxRows) then exit(DocIsSane);
+      lim := cols * rows;
+
+      { The counters, against the board those two describe. }
+      if (mineCount < 1) or (mineCount >= lim) then exit(DocIsSane);
+      if (cellsToGo < 0) or (cellsToGo > lim - mineCount) then exit(DocIsSane);
+      if (flagsPlaced < 0) or (flagsPlaced > lim) then exit(DocIsSane);
+      if (elapsed < 0) or (elapsed > maxTimer) then exit(DocIsSane);
+
+      { The enums, tested against their own first and last values -- always    }
+      { true of anything this program wrote, and the only way to catch a       }
+      { stored ordinal that is not a member of the type at all.                }
+      {                                                                        }
+      { Through ord(), not by comparing the enums directly: what is in there   }
+      { may not BE a member, and ord() is the one operation defined on the     }
+      { number rather than on the value it is supposed to name.  (It also      }
+      { keeps the test honest about what it is doing -- reading a bit pattern  }
+      { and asking whether it falls in range.)                                 }
+      if (ord(level) < ord(lvBeginner)) or
+         (ord(level) > ord(lvCustom)) then exit(DocIsSane);
+      if (ord(state) < ord(msFresh)) or
+         (ord(state) > ord(msLost)) then exit(DocIsSane);
+
+      { The record book.  noBest is the "no record" sentinel and the largest   }
+      { value a slot may legally hold.                                         }
+      for lv := lvBeginner to lvExpert do
+         if (bestTime[lv] < 0) or (bestTime[lv] > noBest) then exit(DocIsSane);
+
+      { The remembered Custom settings: re-offered as the dialog's defaults,   }
+      { where StuffField writes them into a 3-character field.                 }
+      if (customW < minCusDim) or (customW > maxCusCols) then exit(DocIsSane);
+      if (customH < minCusDim) or (customH > maxCusRows) then exit(DocIsSane);
+      if (customM < minCusMines) or
+         (customM > customW * customH - 9) then exit(DocIsSane);
+
+      { And the board itself.  Only the cells in play are ever read, so only   }
+      { those are checked.  playerMark is the one that matters -- CycleMark    }
+      { cases on it -- but adjMines is free to check while we are here (the    }
+      { packed field holds 0..15 and only 0..8 is a count).                    }
+      for r := 1 to rows do
+         for c := 1 to cols do begin
+            if (ord(cells[r, c].playerMark) < ord(pmNone)) or
+               (ord(cells[r, c].playerMark) > ord(pmQuery)) then exit(DocIsSane);
+            if cells[r, c].adjMines > 8 then exit(DocIsSane)
+         end
+
+   end;
+   DocIsSane := true
 end;
 
 
@@ -1494,6 +1664,13 @@ begin
                             { redirects a repaint (unit globals are NOT         }
                             { auto-initialised; a garbage port here would be    }
                             { drawn into)                                       }
+   picRecording := false;   { no picture is being recorded; same reason as      }
+                            { imagePort -- say it out loud (MSGlobals)          }
+   segRefNum := 0;          { no segment open yet.  Said out loud because the   }
+                            { failure path in step 10 hands segRefNum to        }
+                            { Close_DataSeg before anything has certainly       }
+                            { written it, and a garbage refnum is a worse       }
+                            { argument than a harmlessly wrong one              }
    prRec.PrVersion := 0;    { deliberately INVALID (cPrPrfVersion is never 0):  }
                             { the record is defaulted lazily, by the first      }
                             { print command's EnsurePrRec -- PrPrfDefault waits }
@@ -1656,11 +1833,16 @@ begin
    myDoc := pointer(segPtr);             { the segment, seen as our document }
 
    { (11) Trust check on restored contents.  After a crash (-321) or an       }
-   { upgrade, the bytes may not be a valid MSDoc.  The version       }
-   { stamp is the arbiter -- exactly the Calculator's stale-stamp fallback.   }
-   { We reuse the segment in place (its size is right for this build or we    }
-   { just made it): reset the contents, not the file.                         }
-   if useDefaults or (myDoc^.version <> msDocVersion) then begin
+   { upgrade, the bytes may not be a valid MSDoc.  TWO questions get asked,   }
+   { because they are different questions.  The version stamp says whether    }
+   { the bytes are LAID OUT the way this build reads them -- exactly the      }
+   { Calculator's stale-stamp fallback.  DocIsSane (above) says whether they  }
+   { MEAN anything, which a stamp written once at creation cannot: -321       }
+   { exists precisely to report that what was written AFTER it may not have   }
+   { landed.  Either answer being no takes the same exit -- reuse the segment }
+   { in place (its size is right for this build, or we just made it) and      }
+   { reset the contents, not the file.                                        }
+   if useDefaults or (myDoc^.version <> msDocVersion) or (not DocIsSane) then begin
       useDefaults := true;
       { InitNewDoc does the actual default-filling when the window arrives;   }
       { stamp enough here that a crash BEFORE fcNone leaves it consistent.    }
@@ -1727,7 +1909,44 @@ begin { main program }
          end
       end;
 
-   until toldToDie;         { (5) Only fcTerminate sets this.  Falling off    }
-                            { the end runs the program's normal exit, which   }
-                            { fires SYS_TERMINATE -> LastWishes -> ImDying.   }
+   until toldToDie;         { (5) Only fcTerminate sets this.                 }
+
+   { (6) Release the document segment -- the LAST thing the program does with }
+   { it, and the reason this is here rather than in the fcTerminate arm that  }
+   { set toldToDie.  Close_DataSeg unmaps the segment, and myDoc^ IS the      }
+   { segment: every frame still on the stack when the op was answered holds   }
+   { a pointer into it.  That was fine while only the main loop answered      }
+   { Filer ops, and stopped being fine the moment the DIALOGS started         }
+   { answering them too (HandleFilerOp lives in MSGlobals for exactly that    }
+   { reason) -- an fcTerminate arriving under a modal panel left the dialog's }
+   { teardown, DoWin's record book and DoBoardClick's closing DrawTimer all   }
+   { reading and WRITING through a freed address on the way back out.  Here   }
+   { the loop has ended and the stack is empty, so there is nothing left to   }
+   { hold a stale myDoc.                                                      }
+   {                                                                          }
+   { Moving it here costs the Filer nothing, which is the point: the close    }
+   { sat between the fcTerminate and the ImDying before, and it sits between  }
+   { them still.  ImDying is what unblocks the Filer and it is made by        }
+   { LastWishes, which runs on the way OUT of this program -- after the line  }
+   { below, not before it -- so the Filer waited through this call under the  }
+   { old arrangement exactly as it does under the new one.  All that changed  }
+   { is which frame the call is made from.                                    }
+   {                                                                          }
+   { And the call must be made somewhere: closing is what FLUSHES the segment }
+   { to its backing file, which is what makes the game reappear on the next   }
+   { launch.                                                                  }
+   {                                                                          }
+   { Close_DataSeg can block on disk I/O, and a WM-launched app runs          }
+   { NON-preemptive by default; a non-preemptive process that blocks would    }
+   { stall the scheduler that services its own I/O.  So we open a temporary   }
+   { preemptive window around it: Sched_Class(false) = "make me preemptible", }
+   { then restore (05-os-syscalls section 3 -- the flag is literal and the    }
+   { calls nest).                                                             }
+   Sched_Class(termSched, false);
+   Close_DataSeg(termErr, segRefNum);
+   Sched_Class(termSched, true)
+
+                            { Falling off the end here runs the program's     }
+                            { normal exit, which fires SYS_TERMINATE ->       }
+                            { LastWishes -> ImDying.                          }
 end.
